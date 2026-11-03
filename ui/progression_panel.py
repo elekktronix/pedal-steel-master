@@ -20,7 +20,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.progression_presets import PROGRESSION_PRESETS, ProgressionPreset
+from core.progression_presets import PROGRESSION_PRESETS, ProgressionPreset, resolve_preset_steps
 from core.tab_generator import TabGenerator, TabStep
 from core.permutation_engine import FRANKLIN_24_PERMUTATIONS, PermutationEngine
 
@@ -34,6 +34,7 @@ class ProgressionSequencerWidget(QWidget):
         self.current_step_idx: int = -1
         self.string_count = 10
         self.current_neck_type = "E9"
+        self.neck = None  # set by MainWindow; presets are mapped onto its controllers
 
         self.play_timer = QTimer(self)
         self.play_timer.timeout.connect(self._auto_advance_step)
@@ -169,15 +170,20 @@ class ProgressionSequencerWidget(QWidget):
             return
 
         self.lbl_preset_desc.setText(f"<small>{preset.description}</small>")
-        self.steps = [
-            TabStep(
-                fret=s.fret,
-                engaged_levers=list(s.engaged_levers),
-                grip_strings=set(s.grip_strings),
-                chord_label=s.chord_label,
+        if preset.neck_type != self.current_neck_type:
+            QMessageBox.warning(
+                self, "Different Tuning",
+                f"'{preset.name}' is written for {preset.neck_type}; the active neck is {self.current_neck_type}.",
             )
-            for s in preset.steps
-        ]
+            return
+        steps = resolve_preset_steps(preset, self.neck) if self.neck is not None else None
+        if steps is None:
+            QMessageBox.warning(
+                self, "Missing Controllers",
+                f"The active copedant lacks a pedal or lever that '{preset.name}' needs.",
+            )
+            return
+        self.steps = steps
         self._refresh_table()
         if self.steps:
             self.select_step(0)
@@ -215,6 +221,10 @@ class ProgressionSequencerWidget(QWidget):
 
     def set_neck_type(self, neck_type_str: str):
         self.current_neck_type = neck_type_str
+
+    def set_neck(self, neck):
+        self.neck = neck
+        self.string_count = neck.string_count
 
     def capture_step(self, fret: int, levers: Set[str], grip: Set[int], chord_label: str = ""):
         step = TabStep(

@@ -2,14 +2,16 @@
 24-chord major/minor selector, multi-tuning C6/E9 engine, and clean menu delegation.
 """
 
+import logging
 from pathlib import Path
 from typing import Optional, Set
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
+    QDialog,
     QDockWidget,
     QFileDialog,
     QFrame,
@@ -25,8 +27,8 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.audio import MidiAudioEngine
-from core.models import Neck, NeckType, SteelGuitar
+from core.audio import MidiAudioEngine, compute_newman_cents
+from core.models import Neck, NeckType, SteelGuitar, migrate_half_stop_tokens
 from core.presets import build_standard_d10_guitar
 from core.profile_manager import ProfileManager
 from core.settings import load_settings, save_settings
@@ -46,6 +48,9 @@ from ui.scale_finder_widget import ScaleFinderWidget
 from ui.stance_chord_inspector_dialog import StanceChordInspectorDialog
 from ui.themes import DARK_THEME_QSS, LIGHT_THEME_QSS
 from ui.voicing_dialog import VoicingFinderWidget
+from core.theory import to_root_name
+
+log = logging.getLogger(__name__)
 
 
 class MainWindow(QMainWindow):
@@ -59,6 +64,8 @@ class MainWindow(QMainWindow):
         self.settings = load_settings()
 
         self.audio = MidiAudioEngine()
+        self.audio.set_compensated_temperament(self.settings.get("use_newman_tuning", False))
+        self._batch_depth = 0  # >0 while apply_stance() is running; defers dependent refreshes
 
         # Load persisted guitar setup if present, otherwise build standard D10
         storage_dir = ProfileManager.ensure_storage_dir() or getattr(
@@ -69,9 +76,13 @@ class MainWindow(QMainWindow):
             try:
                 self.guitar = SteelGuitar.load_from_file(str(active_setup_path))
             except Exception:
+                log.exception("Could not load %s; using factory presets", active_setup_path)
                 self.guitar = build_standard_d10_guitar()
         else:
             self.guitar = build_standard_d10_guitar()
+        # Persisted setups predate engagement-aware half-stop splits ("P3HS" -> "P3_HALF", D-08).
+        for neck in self.guitar.necks:
+            migrate_half_stop_tokens(neck)
 
         self.current_neck_idx: int = 0
         self.voice_leader_dlg = None
@@ -331,7 +342,9 @@ class MainWindow(QMainWindow):
         self.lever_panel.pinch_requested.connect(lambda: self._play_pocket(roll=False))
         self.lever_panel.roll_requested.connect(lambda: self._play_pocket(roll=True))
         self.lever_panel.arpeggiate_requested.connect(self._arpeggiate_active_pocket)
-        self.lever_panel.all_strings_requested.connect(lambda: self._apply_pocket_preset(set(range(1, 15))))
+        self.lever_panel.all_strings_requested.connect(
+            lambda: self._apply_pocket_preset(set(range(1, self.guitar.necks[self.current_neck_idx].string_count + 1)))
+        )
         self.lever_panel.clear_pocket_requested.connect(lambda: self._apply_pocket_preset(set()))
         root_layout.addWidget(self.lever_panel, stretch=0)
 
@@ -375,9 +388,12 @@ class MainWindow(QMainWindow):
         if not root or root == "None":
             return
         q_tag = "Minor" if "Minor" in chord_type else "Major"
-        clean_r = ENHARMONIC_FLAT_NAMES.get(root, root)
-        match_text = f"{clean_r} {q_tag}"
-        idx = self.combo_up_neck_chord.findText(match_text)
+        # Match by pitch class so sharps and flats both find the dropdown entry (D-05).
+        dropdown_roots = [self.combo_up_neck_chord.itemData(i)[0] for i in range(0, self.combo_up_neck_chord.count(), 2)]
+        clean_r = to_root_name(root, dropdown_roots)
+        if not clean_r:
+            return
+        idx = self.combo_up_neck_chord.findText(f"{clean_r} {q_tag}")
         if idx >= 0 and idx != self.combo_up_neck_chord.currentIndex():
             self.combo_up_neck_chord.blockSignals(True)
             self.combo_up_neck_chord.setCurrentIndex(idx)
@@ -429,19 +445,6 @@ class MainWindow(QMainWindow):
         self.star_map_layout.addStretch()
 
     def _apply_star_map_landmark(self, landmark: StarMapLandmark, btn: Optional[QPushButton] = None):
-        self.canvas.set_bar_fret(landmark.fret)
-        self._sync_fret_widgets(landmark.fret)
-
-        for pid, pbtn in self.lever_panel.pedal_buttons.items():
-            pbtn.blockSignals(True)
-            pbtn.set_engagement_state(2 if pid in landmark.controllers else 0)
-            pbtn.blockSignals(False)
-        for lid, lbtn in self.lever_panel.lever_buttons.items():
-            lbtn.blockSignals(True)
-            lbtn.set_engagement_state(2 if lid in landmark.controllers else 0)
-            lbtn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(landmark.controllers))
-
         if btn:
             for i in range(self.star_map_layout.count()):
                 w = self.star_map_layout.itemAt(i).widget()
@@ -474,10 +477,7 @@ class MainWindow(QMainWindow):
                 }
             """)
 
-        self._apply_pocket_preset(landmark.target_strings)
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
+        self.apply_stance(landmark.fret, landmark.controllers, landmark.target_strings)
 
     def _on_bar_fret_changed(self, fret: int):
         self.fret_slider.blockSignals(True)
@@ -488,24 +488,55 @@ class MainWindow(QMainWindow):
         self.fret_spin.blockSignals(False)
 
         self.canvas.set_bar_fret(fret)
+        self._refresh_stance_dependents()
+
+    def apply_stance(
+        self,
+        fret: int,
+        controllers,
+        pocket=None,
+        *,
+        play: bool = True,
+        banner: Optional[str] = None,
+    ):
+        """Single entry point for programmatically setting the stance (D-03).
+
+        Updates the canvas, fret widgets, lever buttons AND the lever panel's own state/badge, the
+        pocket, then refreshes dependent views once (D-31). Controllers may include "<ID>_HALF".
+        """
+        self._batch_depth += 1
+        try:
+            self.canvas.set_bar_fret(fret)
+            self._sync_fret_widgets(fret)
+            active = self.lever_panel.set_active_controllers(set(controllers))
+            self.canvas.set_engaged_levers(active)
+            if pocket is not None:
+                self._apply_pocket_preset(set(pocket))
+            if banner is not None:
+                self.canvas.set_explicit_banner(banner)
+        finally:
+            self._batch_depth -= 1
+        self._refresh_stance_dependents()
+        if play:
+            self._play_pocket(roll=False)
+
+    def _refresh_stance_dependents(self):
+        """Refreshes views derived from the current stance (skipped while a batch is running)."""
+        if self._batch_depth:
+            return
         self._update_relative_moves_hub()
         self._update_stance_inspector_if_open()
         if hasattr(self, "circle_widget") and self.circle_widget.isVisible():
             self.circle_widget.update_current_stance(
-                fret, self.canvas.engaged_levers, self.canvas.active_pocket
+                self.canvas.bar_fret, self.canvas.engaged_levers, self.canvas.active_pocket
             )
 
     def _sync_fret_widgets(self, fret: int):
         self._on_bar_fret_changed(fret)
 
     def _on_levers_changed(self, active_levers: set):
-        self.canvas.set_engaged_levers(active_levers)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
-        if hasattr(self, "circle_widget") and self.circle_widget.isVisible():
-            self.circle_widget.update_current_stance(
-                self.canvas.bar_fret, active_levers, self.canvas.active_pocket
-            )
+        self.canvas.set_engaged_levers(set(active_levers))
+        self._refresh_stance_dependents()
 
     def _init_sequencer_dock(self):
         self.dock_sequencer = QDockWidget("Progression Sequencer & Tablature", self)
@@ -541,15 +572,22 @@ class MainWindow(QMainWindow):
             return
         pocket_states = [s for s in self.canvas.active_states if s.string_number in self.canvas.active_pocket]
         pocket_states.sort(key=lambda s: s.string_number, reverse=True)
-        pitches = [s.active_midi for s in pocket_states]
-        self.audio.play_scale_sequence(pitches, delay=0.10)
+        cents = self._current_cents([s.string_number for s in pocket_states])
+        for i, s in enumerate(pocket_states):
+            delay_ms = int(i * 100)
+            QTimer.singleShot(
+                delay_ms,
+                lambda st=s: self.audio.play_note(st.active_midi, st.string_number, cents_offset=cents.get(st.string_number, 0.0)),
+            )
 
     def _on_grip_bar_pocket_changed(self, pocket: Set[int]):
         self.canvas.set_active_pocket(pocket)
         if hasattr(self, "scale_finder"):
             self.scale_finder.set_active_pocket(pocket)
-        if hasattr(self, "circle_widget"):
+        if hasattr(self, "circle_widget") and self.circle_widget.isVisible() and not self._batch_depth:
             self.circle_widget.set_active_pocket(pocket)
+        elif hasattr(self, "circle_widget"):
+            self.circle_widget.active_pocket = set(pocket)
 
     def _on_canvas_pocket_changed(self, pocket: Set[int]):
         self.grip_bar.sync_highlights(pocket)
@@ -590,7 +628,7 @@ class MainWindow(QMainWindow):
         if hasattr(self, "circle_widget"):
             self.circle_widget.update_neck(neck)
         if hasattr(self, "sequencer"):
-            self.sequencer.string_count = neck.string_count
+            self.sequencer.set_neck(neck)
             self.sequencer.set_neck_type("C6" if is_c6 else "E9")
         if hasattr(self, "voice_leader_dlg") and self.voice_leader_dlg is not None:
             self.voice_leader_dlg.set_neck(neck)
@@ -605,7 +643,7 @@ class MainWindow(QMainWindow):
         self.combo_copedant.clear()
 
         for idx, neck in enumerate(self.guitar.necks):
-            self.combo_copedant.addItem(f"{neck.name} ({neck.string_count} Str)", ("neck", idx))
+            self.combo_copedant.addItem(self._neck_display_name(neck), ("neck", idx))
 
         user_profiles = ProfileManager.list_user_profiles()
         if user_profiles:
@@ -628,18 +666,19 @@ class MainWindow(QMainWindow):
             self.current_neck_idx = value
             self._load_current_neck()
         elif kind == "profile":
-            loaded_neck = ProfileManager.load_user_profile(value)
-            if loaded_neck:
-                self.guitar.necks[self.current_neck_idx] = loaded_neck
-                self._load_current_neck()
-                self._refresh_copedant_dropdown()
+            self._load_named_profile(value)
+
+    @staticmethod
+    def _neck_display_name(neck: Neck) -> str:
+        marker = "📁 " if neck.source_profile else ""
+        return f"{marker}{neck.name} ({neck.string_count} Str)"
 
     def _rebuild_copedant_menu(self):
         if not hasattr(self, "copedant_select_menu"):
             return
         self.copedant_select_menu.clear()
         for idx, neck in enumerate(self.guitar.necks):
-            action = QAction(f"{neck.name} ({neck.string_count} Strings)", self)
+            action = QAction(self._neck_display_name(neck), self)
             action.setCheckable(True)
             action.setChecked(idx == self.current_neck_idx)
             action.triggered.connect(lambda checked=False, i=idx: self._select_copedant_index(i))
@@ -773,23 +812,10 @@ class MainWindow(QMainWindow):
         self.canvas.set_scale_analysis(root, scale_name)
 
     def _apply_scale_step(self, fret: int, levers: list, string_number: int, banner: str):
-        self.canvas.set_bar_fret(fret)
-        self._sync_fret_widgets(fret)
-
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in levers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in levers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(levers))
-
+        # The scale finder plays the note itself; the pocket is the single stepped string.
+        self.apply_stance(fret, levers, None, play=False)
         self.canvas.set_active_pocket({string_number})
         self.canvas.set_explicit_banner(banner)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
 
     def _on_circle_chord_triggered(self, root: str, chord_type: str, add_to_sequencer: bool):
         neck = self.guitar.necks[self.current_neck_idx]
@@ -817,23 +843,7 @@ class MainWindow(QMainWindow):
         if not chosen_match:
             chosen_match = all_matches[0]
 
-        self.canvas.set_bar_fret(chosen_match.fret)
-        self._sync_fret_widgets(chosen_match.fret)
-
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in chosen_match.engaged_levers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in chosen_match.engaged_levers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(chosen_match.engaged_levers))
-
-        self._apply_pocket_preset(set(chosen_match.grip_strings))
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
+        self.apply_stance(chosen_match.fret, chosen_match.engaged_levers, chosen_match.grip_strings)
 
         if add_to_sequencer:
             chord_tag = f"{root} {chord_type[:3]}"
@@ -845,34 +855,26 @@ class MainWindow(QMainWindow):
                 chord_label=chord_tag,
             )
 
+    def _current_cents(self, strings) -> dict:
+        """Newman compensated-tuning cents for the current stance (empty unless enabled and E9)."""
+        if not self.audio.use_compensated_temperament:
+            return {}
+        neck = self.guitar.necks[self.current_neck_idx]
+        return compute_newman_cents(neck, self.canvas.engaged_levers, strings)
+
     def _play_pocket(self, roll: bool = False):
         if not self.canvas.active_states or not self.canvas.active_pocket:
             return
-        pitches = [
-            s.active_midi
+        # Address each note by its real string number so it plays on that string's channel (D-01).
+        pitches = {
+            s.string_number: s.active_midi
             for s in self.canvas.active_states
             if s.string_number in self.canvas.active_pocket
-        ]
-        self.audio.play_pocket(pitches, roll=roll)
+        }
+        self.audio.play_pocket(pitches, roll=roll, cents=self._current_cents(pitches.keys()))
 
     def _apply_solved_voicing(self, fret: int, levers: list, grip_strings: list):
-        self.canvas.set_bar_fret(fret)
-        self._sync_fret_widgets(fret)
-
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in levers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in levers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(levers))
-
-        self._apply_pocket_preset(set(grip_strings))
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
+        self.apply_stance(fret, levers, grip_strings)
 
     def _export_pdf(self):
         neck = self.guitar.necks[self.current_neck_idx]
@@ -884,15 +886,20 @@ class MainWindow(QMainWindow):
             return
 
         from core.exporter import CopedantPdfExporter
-        CopedantPdfExporter.export_neck_sheet(
-            filepath=filepath,
-            neck=neck,
-            bar_fret=self.canvas.bar_fret,
-            engaged_levers=self.canvas.engaged_levers,
-            active_pocket=self.canvas.active_pocket,
-            target_root=self.harmonic_panel.get_root(),
-            target_chord=self.harmonic_panel.get_chord_type(),
-        )
+        try:
+            CopedantPdfExporter.export_neck_sheet(
+                filepath=filepath,
+                neck=neck,
+                bar_fret=self.canvas.bar_fret,
+                engaged_levers=self.canvas.engaged_levers,
+                active_pocket=self.canvas.active_pocket,
+                target_root=self.harmonic_panel.get_root(),
+                target_chord=self.harmonic_panel.get_chord_type(),
+            )
+        except Exception as e:  # e.g. PermissionError when the PDF is open in a viewer (D-21)
+            log.exception("PDF export failed")
+            QMessageBox.critical(self, "Export Failed", f"Could not write the PDF:\n{e}")
+            return
         QMessageBox.information(self, "Export Successful", f"Reference sheet exported to:\n{filepath}")
 
     def _copy_fretboard_snapshot(self):
@@ -918,23 +925,7 @@ class MainWindow(QMainWindow):
         )
 
     def _apply_sequencer_step(self, fret: int, levers: list, grip_strings: set):
-        self.canvas.set_bar_fret(fret)
-        self._sync_fret_widgets(fret)
-
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in levers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in levers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(levers))
-
-        self._apply_pocket_preset(grip_strings)
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
+        self.apply_stance(fret, levers, grip_strings)
 
     def _toggle_scale_box_menu_preference(self):
         show = self.action_scale_box.isChecked()
@@ -958,6 +949,7 @@ class MainWindow(QMainWindow):
             self.voice_leader_dlg = VoiceLeaderDialog(neck=neck, parent=self)
             self.voice_leader_dlg.setWindowFlags(Qt.Window)
             self.voice_leader_dlg.voicing_path_applied.connect(self._apply_voice_leader_path)
+            self.voice_leader_dlg.voicing_applied.connect(self._apply_solved_voicing)
 
         if hasattr(self.voice_leader_dlg, "set_neck"):
             self.voice_leader_dlg.set_neck(neck)
@@ -970,61 +962,29 @@ class MainWindow(QMainWindow):
 
     def _apply_voice_leader_path(self, solved_steps: list):
         neck = self.guitar.necks[self.current_neck_idx]
-
-        if hasattr(self.sequencer, "clear_all_steps"):
-            self.sequencer.clear_all_steps()
-        elif hasattr(self.sequencer, "clear_sequence"):
-            self.sequencer.clear_sequence()
-        elif hasattr(self.sequencer, "btn_clear") and hasattr(self.sequencer.btn_clear, "click"):
-            self.sequencer.btn_clear.click()
-        else:
-            if hasattr(self.sequencer, "table"):
-                self.sequencer.table.setRowCount(0)
-            if hasattr(self.sequencer, "steps"):
-                self.sequencer.steps.clear()
-
-        self.sequencer.string_count = neck.string_count
+        self.sequencer.set_neck(neck)
+        self.sequencer._clear_all()
 
         for m_idx, v in solved_steps:
-            chord_name = f"M{m_idx + 1}"
             self.sequencer.capture_step(
                 fret=v.fret,
                 levers=set(v.engaged_levers),
                 grip=set(v.grip_strings),
-                chord_label=chord_name,
+                chord_label=f"M{m_idx + 1}",
             )
 
         if solved_steps:
             first_v = solved_steps[0][1]
-            self.canvas.set_bar_fret(first_v.fret)
-            self._sync_fret_widgets(first_v.fret)
-            self.canvas.set_engaged_levers(set(first_v.engaged_levers))
-            self._apply_pocket_preset(set(first_v.grip_strings))
-            self._update_relative_moves_hub()
-            self._update_stance_inspector_if_open()
+            self.apply_stance(first_v.fret, first_v.engaged_levers, first_v.grip_strings, play=False)
 
     def _open_star_map_dialog(self):
         from ui.star_map_widget import StarMapWidget
-        dlg = StarMapWidget(parent=self)
+        dlg = StarMapWidget(neck=self.guitar.necks[self.current_neck_idx], parent=self)
         dlg.landmark_selected.connect(self._on_star_map_dialog_selected)
         dlg.exec()
 
     def _on_star_map_dialog_selected(self, fret: int, controllers: set, target_strings: set):
-        self.canvas.set_bar_fret(fret)
-        self._sync_fret_widgets(fret)
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in controllers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in controllers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(controllers))
-        self._apply_pocket_preset(target_strings)
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
+        self.apply_stance(fret, controllers, target_strings)
 
     def _open_permutation_trainer(self):
         from ui.permutation_trainer_dialog import PermutationTrainerDialog
@@ -1045,8 +1005,14 @@ class MainWindow(QMainWindow):
             initial_tab=initial_tab,
             parent=self,
         )
-        dialog.neck_updated.connect(self._on_copedant_modified)
-        dialog.exec()
+        if dialog.exec() == QDialog.Accepted:
+            # Follow the neck the user was editing when they pressed Apply.
+            self.current_neck_idx = dialog.current_neck_idx
+            self._on_copedant_modified()
+        elif dialog.guitar_changed:
+            # Duplicate / Save-as-Profile added necks even though the dialog was cancelled.
+            self._save_active_guitar_setup()
+            self._refresh_copedant_dropdown()
 
     def _open_splits_manager(self):
         """Opens Copedant Editor focused directly on the Mechanical Splits tab."""
@@ -1062,6 +1028,7 @@ class MainWindow(QMainWindow):
             dlg = CopedantEditorDialog(neck=neck, guitar=self.guitar, current_neck_idx=self.current_neck_idx, parent=self)
             dlg._toggle_c6_pedal_offset(checked)
             dlg._apply_and_close()
+            self._on_copedant_modified()
 
     def _on_copedant_modified(self):
         self._save_active_guitar_setup()
@@ -1123,29 +1090,13 @@ class MainWindow(QMainWindow):
         self.audio.set_compensated_temperament(use_newman)
 
     def _apply_relative_move(self, target_fret: int, controllers: set, target_strings: set, chord_root: str = "", chord_type: str = ""):
-        self.canvas.set_bar_fret(target_fret)
-        self._sync_fret_widgets(target_fret)
-
-        for pid, btn in self.lever_panel.pedal_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if pid in controllers else 0)
-            btn.blockSignals(False)
-        for lid, btn in self.lever_panel.lever_buttons.items():
-            btn.blockSignals(True)
-            btn.set_engagement_state(2 if lid in controllers else 0)
-            btn.blockSignals(False)
-        self.canvas.set_engaged_levers(set(controllers))
-
         if chord_root:
             self.harmonic_panel.set_target(chord_root, chord_type or "Major")
+        self.apply_stance(target_fret, controllers, target_strings)
 
-        self._apply_pocket_preset(target_strings)
-        self._play_pocket(roll=False)
-        self._update_relative_moves_hub()
-        self._update_stance_inspector_if_open()
-
-    def _on_node_clicked(self, midi_pitch: int):
-        self.audio.play_note(midi_pitch)
+    def _on_node_clicked(self, midi_pitch: int, string_number: int = 0):
+        cents = self._current_cents([string_number]).get(string_number, 0.0) if string_number else 0.0
+        self.audio.play_note(midi_pitch, string_number or None, cents_offset=cents)
 
     def _open_import_copedant_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
@@ -1166,6 +1117,9 @@ class MainWindow(QMainWindow):
                 new_neck = Neck.from_compass_json(data)
             else:
                 new_neck = Neck.from_dict(data)
+            migrate_half_stop_tokens(new_neck)
+            # An imported copedant is a new entry, not linked to any existing profile file.
+            new_neck.source_profile = ""
 
             existing_names = [n.name for n in self.guitar.necks]
             base_name = new_neck.name
@@ -1206,24 +1160,63 @@ class MainWindow(QMainWindow):
         self._refresh_copedant_dropdown()
 
     def _load_named_profile(self, profile_name: str):
-        loaded_neck = ProfileManager.load_user_profile(profile_name)
-        if loaded_neck:
-            self.guitar.necks[self.current_neck_idx] = loaded_neck
-            self._load_current_neck()
+        """Opens a user profile as its own neck entry. It never overwrites the active (e.g. factory)
+        neck; re-loading a profile that is already open refreshes that entry from disk (D-02)."""
+        try:
+            loaded_neck = ProfileManager.load_user_profile(profile_name)
+        except Exception as e:
+            QMessageBox.critical(self, "Profile Error", f"Failed to load profile '{profile_name}':\n{e}")
             self._refresh_copedant_dropdown()
+            return
+        if not loaded_neck:
+            QMessageBox.warning(self, "Profile Not Found", f"Profile '{profile_name}' could not be found.")
+            self._refresh_copedant_dropdown()
+            return
+        migrate_half_stop_tokens(loaded_neck)
+
+        existing_idx = next(
+            (i for i, n in enumerate(self.guitar.necks) if n.source_profile == loaded_neck.source_profile),
+            None,
+        )
+        if existing_idx is None:
+            self.guitar.necks.append(loaded_neck)
+            self.current_neck_idx = len(self.guitar.necks) - 1
+        else:
+            self.guitar.necks[existing_idx] = loaded_neck
+            self.current_neck_idx = existing_idx
+
+        self._save_active_guitar_setup()
+        self._refresh_copedant_dropdown()
+        self._load_current_neck()
 
     def _load_file(self):
         path, _ = QFileDialog.getOpenFileName(self, "Import All Necks Setup", "", "JSON Files (*.json)")
-        if path:
-            self.guitar = SteelGuitar.load_from_file(path)
-            self.current_neck_idx = 0
-            self._refresh_copedant_dropdown()
-            self._load_current_neck()
+        if not path:
+            return
+        try:
+            guitar = SteelGuitar.load_from_file(path)
+            if not guitar.necks:
+                raise ValueError("The file contains no necks.")
+        except Exception as e:  # D-21
+            log.exception("Setup import failed")
+            QMessageBox.critical(self, "Import Error", f"Failed to load setup file:\n{e}")
+            return
+        self.guitar = guitar
+        for neck in self.guitar.necks:
+            migrate_half_stop_tokens(neck)
+        self.current_neck_idx = 0
+        self._refresh_copedant_dropdown()
+        self._load_current_neck()
 
     def _save_file(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export All Necks Setup", "", "JSON Files (*.json)")
-        if path:
+        if not path:
+            return
+        try:
             self.guitar.save_to_file(path)
+        except Exception as e:  # D-21
+            log.exception("Setup export failed")
+            QMessageBox.critical(self, "Export Error", f"Failed to save setup file:\n{e}")
 
     def _save_active_guitar_setup(self):
         try:
@@ -1232,13 +1225,10 @@ class MainWindow(QMainWindow):
             )
             active_setup_path = storage_dir / "active_guitar_setup.json"
             self.guitar.save_to_file(str(active_setup_path))
-
-            item_data = self.combo_copedant.currentData()
-            if item_data and item_data[0] == "profile":
-                neck = self.guitar.necks[self.current_neck_idx]
-                ProfileManager.save_user_profile(item_data[1], neck)
-        except Exception as e:
-            print(f"[Error saving guitar setup]: {e}")
+            # Profile files are written by the copedant editor for profile-linked necks
+            # (Neck.source_profile); nothing to write back here.
+        except Exception:
+            log.exception("Error saving active guitar setup")
 
     def closeEvent(self, event):
         self._save_active_guitar_setup()

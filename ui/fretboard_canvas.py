@@ -15,7 +15,7 @@ from core.resolver import ActiveStringState, FretboardResolver
 class FretboardCanvas(QWidget):
     fret_changed = Signal(int)
     pocket_changed = Signal(set)
-    node_clicked = Signal(int)
+    node_clicked = Signal(int, int)  # (midi_pitch, string_number)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -153,7 +153,7 @@ class FretboardCanvas(QWidget):
                     # Prepend Nashville Number if enabled and key is set
                     if self.show_nashville and self.target_root and self.target_root != "None":
                         from core.theory import get_nashville_chord_symbol
-                        nns_symbol = get_nashville_chord_symbol(raw_tag, self.target_root)
+                        nns_symbol = get_nashville_chord_symbol(raw_tag, self.target_root, family=chord_family)
                         if nns_symbol:
                             display_tag = f"[{nns_symbol}]  {raw_tag}"
                     self.detected_chord_label = display_tag
@@ -186,7 +186,7 @@ class FretboardCanvas(QWidget):
             dx = x - bar_x
             dy = y - sy
             if (dx * dx + dy * dy) <= (node_radius * node_radius):
-                self.node_clicked.emit(state.active_midi)
+                self.node_clicked.emit(state.active_midi, state.string_number)
                 return
 
         # 2. Check if clicked on string number badges on the left

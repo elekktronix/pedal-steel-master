@@ -325,54 +325,68 @@ class LeverTogglePanel(QWidget):
         self._update_feasibility()
         self.levers_changed.emit(set(self.active_controllers))
 
+    def set_active_controllers(self, controllers: Set[str]) -> Set[str]:
+        """Sets button states, the panel's own state and the feasibility badge WITHOUT emitting
+        levers_changed (D-03). Accepts "<ID>_HALF" tokens. Returns the tokens actually applied
+        (controllers that do not exist on this neck are dropped)."""
+        buttons = {**self.pedal_buttons, **self.lever_buttons}
+        applied: Set[str] = set()
+        for token in controllers:
+            base = token.replace("_HALF", "")
+            if base in buttons:
+                applied.add(f"{base}_HALF" if token.endswith("_HALF") else base)
+        for cid, btn in buttons.items():
+            state = 2 if cid in applied else (1 if f"{cid}_HALF" in applied else 0)
+            btn.set_engagement_state(state)
+        self.active_controllers = applied
+        self._update_feasibility()
+        return set(applied)
+
     def _update_feasibility(self):
-        try:
-            from core.ergonomics import ErgonomicsEngine, StanceDifficulty
-            base_ctrls = {c.replace("_HALF", "") for c in self.active_controllers}
-            has_half = any("_HALF" in c for c in self.active_controllers)
+        from core.ergonomics import ErgonomicsEngine, StanceDifficulty
 
-            stance = ErgonomicsEngine.evaluate_stance(base_ctrls)
-            half_tag = " (Half-Stop)" if has_half else ""
+        base_ctrls = {c.replace("_HALF", "") for c in self.active_controllers}
+        has_half = any("_HALF" in c for c in self.active_controllers)
 
-            if not stance.is_possible:
-                desc = getattr(stance, "reason", "") or "Conflicting controllers engaged"
-                self.lbl_feasibility_badge.setText(f"❌ Stance Impossible: {desc}")
-                self.lbl_feasibility_badge.setStyleSheet("""
-                    background-color: #4c1d24;
-                    color: #ea868f;
-                    border: 1px solid #dc3545;
-                    font-weight: bold;
-                    border-radius: 4px;
-                    padding: 2px 10px;
-                    font-size: 11px;
-                """)
-            elif getattr(stance, "difficulty", None) == StanceDifficulty.AWKWARD:
-                desc = getattr(stance, "description", "") or "Challenging reach"
-                self.lbl_feasibility_badge.setText(f"⚠️ Stance Awkward{half_tag}: {desc}")
-                self.lbl_feasibility_badge.setStyleSheet("""
-                    background-color: #4d3e12;
-                    color: #ffda6a;
-                    border: 1px solid #ffc107;
-                    font-weight: bold;
-                    border-radius: 4px;
-                    padding: 2px 10px;
-                    font-size: 11px;
-                """)
-            else:
-                count = len(self.active_controllers)
-                tag = "Open Fretboard" if count == 0 else f"{count} Engaged{half_tag}"
-                self.lbl_feasibility_badge.setText(f"✅ Stance Feasible ({tag})")
-                self.lbl_feasibility_badge.setStyleSheet("""
-                    background-color: #163820;
-                    color: #75b798;
-                    border: 1px solid #28a745;
-                    font-weight: bold;
-                    border-radius: 4px;
-                    padding: 2px 10px;
-                    font-size: 11px;
-                """)
-        except Exception:
-            self.lbl_feasibility_badge.setText("✅ Stance Feasible")
+        stance = ErgonomicsEngine.evaluate_stance(base_ctrls)
+        half_tag = " (Half-Stop)" if has_half else ""
+        if not stance.is_possible:
+            desc = "; ".join(stance.clash_reasons) or "Conflicting controllers engaged"  # D-25
+            self.lbl_feasibility_badge.setText(f"❌ Stance Impossible: {desc}")
+            self.lbl_feasibility_badge.setStyleSheet("""
+                background-color: #4c1d24;
+                color: #ea868f;
+                border: 1px solid #dc3545;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 11px;
+            """)
+        elif getattr(stance, "difficulty", None) == StanceDifficulty.AWKWARD:
+            desc = getattr(stance, "description", "") or "Challenging reach"
+            self.lbl_feasibility_badge.setText(f"⚠️ Stance Awkward{half_tag}: {desc}")
+            self.lbl_feasibility_badge.setStyleSheet("""
+                background-color: #4d3e12;
+                color: #ffda6a;
+                border: 1px solid #ffc107;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 11px;
+            """)
+        else:
+            count = len(self.active_controllers)
+            tag = "Open Fretboard" if count == 0 else f"{count} Engaged{half_tag}"
+            self.lbl_feasibility_badge.setText(f"✅ Stance Feasible ({tag})")
+            self.lbl_feasibility_badge.setStyleSheet("""
+                background-color: #163820;
+                color: #75b798;
+                border: 1px solid #28a745;
+                font-weight: bold;
+                border-radius: 4px;
+                padding: 2px 10px;
+                font-size: 11px;
+            """)
 
     def reset_all(self):
         for btn in self.pedal_buttons.values():

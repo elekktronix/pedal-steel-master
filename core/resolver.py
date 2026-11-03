@@ -107,10 +107,16 @@ class FretboardResolver:
             has_half_stop = any(p[2] for p in pulls)
             total_pull_delta = 0
 
-            # Only test for split overrides if 2 or more controllers pull on the string simultaneously
+            # Only test for split overrides if 2 or more controllers pull on the string simultaneously.
+            # Engagement-aware rules (e.g. ["LKL", "P3_HALF"]) win over base-ID rules (["LKL", "P3"]);
+            # a base-ID rule still applies to half-engaged controllers when no half-specific rule exists.
             if len(pulls) >= 2:
+                token_engaged = frozenset(f"{p[0]}_HALF" if p[2] else p[0] for p in pulls)
                 base_engaged = frozenset(p[0] for p in pulls)
-                if (str_num, base_engaged) in active_splits:
+                if (str_num, token_engaged) in active_splits:
+                    total_pull_delta = active_splits[(str_num, token_engaged)]
+                    split_applied = True
+                elif (str_num, base_engaged) in active_splits:
                     total_pull_delta = active_splits[(str_num, base_engaged)]
                     split_applied = True
                 else:

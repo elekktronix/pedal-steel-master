@@ -207,6 +207,7 @@ class CircleOfFifthsWidget(QWidget):
     def __init__(self, neck: Neck, is_dark_mode: bool = True, parent=None):
         super().__init__(parent)
         self.neck = neck
+        self._voicing_cache: dict = {}
         self.is_dark_mode = is_dark_mode
         self.current_key: str = "G"
         self.active_pocket: Set[int] = {8, 6, 4}
@@ -423,6 +424,7 @@ class CircleOfFifthsWidget(QWidget):
 
     def update_neck(self, neck: Neck):
         self.neck = neck
+        self._voicing_cache.clear()
         self._refresh_family_buttons()
 
     def update_current_stance(self, bar_fret: int, levers: Set[str], pocket: Set[int]):
@@ -439,14 +441,19 @@ class CircleOfFifthsWidget(QWidget):
             root = data["root"]
             c_type = data["chord_type"]
 
-            matches = VoicingSolver.find_all_voicings(
-                neck=self.neck,
-                root_name=root,
-                chord_type=c_type,
-                max_fret=min(22, bar_fret + 9),
-                filter_awkward=True,
-                omitted_intervals={"5"} if "7" in c_type else None,
-            )
+            # Voicings depend on the neck and fret window only, not on the levers: cache them (D-31).
+            cache_key = (id(self.neck), root, c_type, min(22, bar_fret + 9))
+            matches = self._voicing_cache.get(cache_key)
+            if matches is None:
+                matches = VoicingSolver.find_all_voicings(
+                    neck=self.neck,
+                    root_name=root,
+                    chord_type=c_type,
+                    max_fret=min(22, bar_fret + 9),
+                    filter_awkward=True,
+                    omitted_intervals={"5"} if "7" in c_type else None,
+                )
+                self._voicing_cache[cache_key] = matches
 
             pocket_matches = [m for m in matches if m.grip_strings == pocket_list]
             pool = pocket_matches if (self.cb_lock_pocket.isChecked() and pocket_matches) else matches

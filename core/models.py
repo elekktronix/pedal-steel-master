@@ -138,10 +138,13 @@ class Neck:
     author: str = "PSG Compass"
     author_bio: str = ""
     social_media: str = ""
+    # Name of the user profile file this neck was loaded from / is linked to ("" = not a profile).
+    source_profile: str = ""
 
     def to_dict(self) -> dict:
         return {
             "name": self.name,
+            "source_profile": self.source_profile,
             "neck_type": self.neck_type.value if hasattr(self.neck_type, "value") else str(self.neck_type),
             "string_count": int(self.string_count),
             "description": self.description,
@@ -181,6 +184,7 @@ class Neck:
             author=data.get("author", "PSG Compass"),
             author_bio=data.get("author_bio", ""),
             social_media=data.get("social_media", ""),
+            source_profile=str(data.get("source_profile", "")),
         )
 
     @classmethod
@@ -259,6 +263,149 @@ class Neck:
             author_bio=bio,
             social_media=social,
         )
+
+
+HALF_SUFFIX = "_HALF"
+
+# Knee lever IDs removed by the copedant editor on load (legacy variants).
+RETIRED_KNEE_LEVER_IDS = {"VL2", "LKR2", "RKL2", "VR", "VR2", "RKRHS"}
+
+
+def _remap_token(token: str, mapping: Dict[str, str]) -> str:
+    """Maps a controller token, preserving a trailing '_HALF' engagement suffix."""
+    if token.endswith(HALF_SUFFIX):
+        base = token[: -len(HALF_SUFFIX)]
+        return mapping.get(base, base) + HALF_SUFFIX
+    return mapping.get(token, token)
+
+
+def _remap_label(label: str, old_id: str, new_id: str) -> str:
+    """Keeps custom labels, but renumbers labels that merely echo the controller ID
+    (e.g. 'P1' -> 'P2', 'P1 (A)' -> 'P2 (A)', 'Pedal 1 (A)' -> 'Pedal 2 (A)')."""
+    if old_id == new_id or not label:
+        return label or new_id
+    if label == old_id:
+        return new_id
+    if label.startswith(old_id + " "):
+        return new_id + label[len(old_id):]
+    old_num, new_num = old_id[1:], new_id[1:]
+    prefix = f"Pedal {old_num}"
+    if old_id.startswith("P") and new_id.startswith("P") and old_num.isdigit() and new_num.isdigit():
+        if label == prefix or label.startswith(prefix + " "):
+            return f"Pedal {new_num}" + label[len(prefix):]
+    return label
+
+
+def remap_controller_ids(neck: Neck, mapping: Dict[str, str]) -> None:
+    """Renames controller IDs everywhere they are referenced (pedals, knee levers, split rules,
+    half-stop rules). The mapping is applied simultaneously, so shifts like
+    {"P1": "P2", "P2": "P3"} are safe. Labels that merely echo the old ID are renumbered.
+    """
+    mapping = {k: v for k, v in mapping.items() if k != v}
+    if not mapping:
+        return
+
+    def _remap_group(group: Dict[str, CopedantChange]) -> Dict[str, CopedantChange]:
+        out: Dict[str, CopedantChange] = {}
+        for old_id, ctrl in group.items():
+            new_id = mapping.get(old_id, old_id)
+            if new_id in out:
+                raise ValueError(f"Controller ID collision while remapping: {new_id}")
+            out[new_id] = CopedantChange(
+                id=new_id,
+                label=_remap_label(ctrl.label, old_id, new_id),
+                changes=dict(ctrl.changes),
+            )
+        return out
+
+    neck.pedals = _remap_group(neck.pedals)
+    neck.knee_levers = _remap_group(neck.knee_levers)
+    for rule in neck.splits:
+        rule.controllers = [_remap_token(c, mapping) for c in rule.controllers]
+    for rule in neck.half_stops:
+        rule.controller_id = _remap_token(rule.controller_id, mapping)
+
+
+def migrate_legacy_ids(neck: Neck) -> None:
+    """Normalizes legacy controller IDs in place: 'VL' becomes 'LKV' (with all split/half-stop
+    references), and retired knee lever variants are removed together with the rules that
+    referenced them.
+    """
+    if "VL" in neck.knee_levers and "LKV" not in neck.knee_levers:
+        remap_controller_ids(neck, {"VL": "LKV"})
+        lkv = neck.knee_levers["LKV"]
+        if lkv.label == "VL":
+            lkv.label = "LKV"
+
+    retired = {r for r in RETIRED_KNEE_LEVER_IDS if r in neck.knee_levers}
+    if retired:
+        for r_id in retired:
+            del neck.knee_levers[r_id]
+
+        def _uses_retired(token: str) -> bool:
+            return token.replace(HALF_SUFFIX, "") in retired
+
+        neck.splits = [s for s in neck.splits if not any(_uses_retired(c) for c in s.controllers)]
+        neck.half_stops = [h for h in neck.half_stops if not _uses_retired(h.controller_id)]
+
+
+def migrate_half_stop_tokens(neck: Neck) -> bool:
+    """Converts legacy pseudo-controller split tokens like 'P3HS' into the engagement token
+    'P3_HALF' when 'P3HS' is not a real controller but 'P3' is. Adds default +/-1 half-stop
+    rules (pulls of 2+ semitones) for affected controllers that have none, so the half-stop
+    can actually be engaged. Returns True if anything changed.
+    """
+    defined = set(neck.pedals) | set(neck.knee_levers)
+    converted: Set[str] = set()
+
+    def _fix(token: str) -> str:
+        if token in defined or not token.endswith("HS") or token.endswith(HALF_SUFFIX):
+            return token
+        base = token[:-2]
+        if base in defined:
+            converted.add(base)
+            return base + HALF_SUFFIX
+        return token
+
+    for rule in neck.splits:
+        rule.controllers = [_fix(c) for c in rule.controllers]
+
+    has_rules = {h.controller_id for h in neck.half_stops}
+    for base in sorted(converted - has_rules):
+        ctrl = neck.pedals.get(base) or neck.knee_levers.get(base)
+        for s_num, delta in sorted(ctrl.changes.items()):
+            if abs(delta) >= 2:
+                neck.half_stops.append(
+                    HalfStopRule(
+                        controller_id=base,
+                        string_number=s_num,
+                        semitone_delta=1 if delta > 0 else -1,
+                        is_active=True,
+                        description=f"{base} half-stop (migrated)",
+                    )
+                )
+    return bool(converted)
+
+
+def shift_pedal_ids(neck: Neck, offset: int) -> None:
+    """Renumbers every numeric pedal ID by `offset` (e.g. +1 to make room for a Franklin P1),
+    remapping all split and half-stop references."""
+    mapping: Dict[str, str] = {}
+    for p_id in neck.pedals:
+        if p_id.startswith("P") and p_id[1:].isdigit():
+            new_num = int(p_id[1:]) + offset
+            if new_num < 1:
+                raise ValueError(f"Cannot shift {p_id} by {offset}")
+            mapping[p_id] = f"P{new_num}"
+    remap_controller_ids(neck, mapping)
+
+
+def undefined_rule_controllers(neck: Neck) -> Set[str]:
+    """Controller IDs referenced by split/half-stop rules that do not exist on the neck."""
+    defined = set(neck.pedals) | set(neck.knee_levers)
+    referenced = {c.replace(HALF_SUFFIX, "") for s in neck.splits for c in s.controllers}
+    referenced |= {h.controller_id.replace(HALF_SUFFIX, "") for h in neck.half_stops}
+    return referenced - defined
 
 
 def detect_potential_splits(neck: Neck) -> List[SplitRule]:

@@ -1,5 +1,6 @@
 """Dialog for saving, naming, and managing custom neck profiles."""
 
+from copy import deepcopy
 from typing import Optional
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (
@@ -88,8 +89,28 @@ class ProfileManagerDialog(QDialog):
             QMessageBox.warning(self, "Invalid Name", "Please enter a profile name.")
             return
 
-        saved_name = ProfileManager.save_neck_profile(self.current_neck, name)
-        QMessageBox.information(self, "Saved", f"Profile '{saved_name}' saved successfully!")
+        safe_name = ProfileManager.sanitize_name(name)
+        if not safe_name:
+            QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
+            return
+        if ProfileManager.profile_exists(safe_name):
+            reply = QMessageBox.question(
+                self, "Overwrite Profile", f"Profile '{safe_name}' already exists. Overwrite it?",
+                QMessageBox.Yes | QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                return
+
+        # Save a linked copy; the active neck itself is not modified.
+        profile_neck = deepcopy(self.current_neck)
+        profile_neck.name = safe_name
+        profile_neck.source_profile = safe_name
+        try:
+            path = ProfileManager.save_user_profile(safe_name, profile_neck)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save profile:\n{e}")
+            return
+        QMessageBox.information(self, "Saved", f"Profile '{path.stem}' saved successfully!")
         self._refresh_list()
 
     def _load_selected(self):

@@ -1,20 +1,28 @@
 """Engine for Same-Fret Harmony (Diatonic, I-IV-V, Dominants, and Full Copedant Scan)
 and Relative Fret Movements (Warnock / Barndo).
+
+Stances are declared with functional role tokens (core.stances) and mapped to the neck's real
+controller IDs. Static formulas (Franklin hub, Warnock, Barndo) are verified with the resolver,
+so an option is only offered if it really sounds the chord it names on the active neck.
 """
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
 
 from core.chord_identifier import ChordIdentifier
-from core.models import Neck, NeckType
+from core.models import Neck
 from core.resolver import FretboardResolver
-from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
+from core.stances import detect_roles, grip_matches_chord, is_c6_neck, resolve_stance
+from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
 
 ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
     "A#": "Bb",
     "D#": "Eb",
     "G#": "Ab",
 }
+
+# ChordIdentifier family -> CHORD_FORMULAS key
+_FAMILY_TO_CHORD_TYPE: Dict[str, str] = {"Major 6": "Major 6th", "Minor 6": "Minor 6th"}
 
 
 def format_chord_root(name: str) -> str:
@@ -31,41 +39,91 @@ def _safe_extract_root_and_quality(chord_label: str) -> Tuple[str, str]:
     return ("", "")
 
 
+def _default_neck(c6: bool = False) -> Neck:
+    from core import presets
+
+    return presets.build_standard_c6_10() if c6 else presets.build_standard_emmons_e9_10()
+
+
 @dataclass
 class RelativeMoveOption:
     label: str               # e.g., "I (G)", "IV (C)", "V7 (D7)"
     chord_name: str          # e.g., "G Maj", "C Maj", "D7"
     target_fret: int
     delta_frets: int
-    controllers: Set[str]    # e.g., {"P1", "P2"}
+    controllers: Set[str]    # actual controller IDs, e.g. {"P1", "P2"}
     target_strings: Set[int]
     description: str
     roman_degree: str = ""   # e.g., "I", "IV", "V7", "ii", "vi"
     category: str = "diatonic"
+    chord_root: str = ""     # e.g. "Bb" (for harmonic analysis; never parse chord_name, D-28)
+    chord_type: str = ""     # CHORD_FORMULAS key, e.g. "Minor", "Dominant 7th"
+
+
+# Franklin same-fret hub: (roman, semitones above tonic, chord type, role tokens, grip, description,
+#                          category, require_root). Tonic = E at fret 0.
+_FRANKLIN_HUB = [
+    ("I", 0, "Major", (), {8, 6, 5}, "Tonic I Major (open)", "primary", True),
+    ("ii", 2, "Minor", ("B", "C"), {6, 5, 4}, "Supertonic ii Minor (B+C pedals)", "diatonic", True),
+    ("iii", 4, "Minor", ("D",), {8, 6, 5}, "Mediant iii Minor (D lever lowers Es)", "diatonic", True),
+    ("IV", 5, "Major", ("A", "B"), {8, 6, 5}, "Subdominant IV Major (A&B pedals)", "primary", True),
+    ("vi", 9, "Minor", ("A",), {6, 5, 4}, "Submediant vi Minor (A pedal)", "diatonic", True),
+    ("#I°", 1, "Diminished", ("F",), {6, 5, 4}, "#1 Diminished passing (F lever raises Es)", "dim", True),
+    ("I 6/9", 0, "6/9", ("C",), {6, 5, 4}, "Tonic 6/9 color chord (C pedal)", "color", False),
+]
+
+_E9_SCAN_STANCES: List[Tuple[str, ...]] = [
+    (), ("A", "B"), ("B", "D"), ("A",), ("B",), ("C",), ("F",), ("BL",), ("D",), ("RKL",), ("RKR",),
+    ("B", "C"), ("A", "C"), ("A", "F"), ("B", "F"), ("A", "D"), ("C", "D"), ("C", "F"),
+    ("A", "RKL"), ("B", "RKL"),
+]
+_C6_SCAN_STANCES: List[Tuple[str, ...]] = [
+    (), ("C6P5",), ("C6P6",), ("C6P7",), ("C6P8",),
+    ("C6P5", "C6P6"), ("C6P6", "C6P7"), ("C6P7", "C6P8"),
+]
+# Textbook stances that win ties for a given roman numeral (E9).
+_E9_CANONICAL = {"I": (), "IV": ("A", "B"), "V7": ("B", "D"), "vi": ("A",), "ii": ("B", "C"), "iii": ("D",)}
+_CANONICAL_BONUS = {"I": 500, "IV": 500, "V7": 500, "vi": 400, "ii": 400, "iii": 400}
+
+
+def _root_name(pc: int) -> str:
+    return format_chord_root(NOTE_NAMES_SHARP[pc % 12])
 
 
 class RelativeMovesEngine:
     @classmethod
-    def get_same_fret_diatonic_hub(cls, current_fret: int) -> List[RelativeMoveOption]:
-        """Franklin's original 7 Same-Fret Diatonic etude chords."""
-        base_pc = (4 + current_fret) % 12
-        root_name = format_chord_root(NOTE_NAMES_SHARP[base_pc])
+    def get_same_fret_diatonic_hub(cls, current_fret: int, neck: Optional[Neck] = None) -> List[RelativeMoveOption]:
+        """Franklin's same-fret diatonic etude chords, verified against the neck (D-15)."""
+        neck = neck if neck is not None else _default_neck()
+        roles = detect_roles(neck)
+        tonic_pc = (4 + current_fret) % 12
+        options: List[RelativeMoveOption] = []
 
-        ii_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 2) % 12])
-        iii_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 4) % 12])
-        iv_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 5) % 12])
-        vi_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 9) % 12])
-        sharp1_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 1) % 12])
-
-        return [
-            RelativeMoveOption(f"I ({root_name})", f"{root_name} Maj", current_fret, 0, set(), {8, 6, 5}, f"Tonic I Major at Fret {current_fret}", "I", "primary"),
-            RelativeMoveOption(f"ii ({ii_name}m)", f"{ii_name}m", current_fret, 0, {"P2", "P3"}, {6, 5, 4}, "Supertonic ii Minor (P2+P3)", "ii", "diatonic"),
-            RelativeMoveOption(f"iii ({iii_name}m)", f"{iii_name}m", current_fret, 0, {"RKL"}, {8, 6, 5}, "Mediant iii Minor (RKL lowered Es)", "iii", "diatonic"),
-            RelativeMoveOption(f"IV ({iv_name})", f"{iv_name} Maj", current_fret, 0, {"P1", "P2"}, {8, 6, 5}, "Subdominant IV Major (A&B pedals)", "IV", "primary"),
-            RelativeMoveOption(f"vi ({vi_name}m)", f"{vi_name}m", current_fret, 0, {"P1"}, {6, 5, 4}, "Submediant vi Minor (A pedal)", "vi", "diatonic"),
-            RelativeMoveOption(f"#I° ({sharp1_name}°)", f"{sharp1_name}dim", current_fret, 0, {"LKL"}, {6, 5, 4}, "#1 Diminished passing (LKL raised Es)", "#I°", "dim"),
-            RelativeMoveOption(f"I 6/9 ({root_name}6/9)", f"{root_name}6/9", current_fret, 0, {"P3"}, {6, 5, 4}, "Tonic 6/9 color chord (P3 pedal)", "I 6/9", "color"),
-        ]
+        for roman, offset, chord_type, tokens, grip, desc, cat, need_root in _FRANKLIN_HUB:
+            stance = resolve_stance(neck, tokens, roles)
+            if stance is None:
+                continue
+            root = _root_name(tonic_pc + offset)
+            if not grip_matches_chord(neck, current_fret, stance, grip, root, chord_type, require_root=need_root):
+                continue
+            suffix = {"Minor": "m", "Diminished": "°", "6/9": "6/9"}.get(chord_type, "")
+            chord_name = f"{root} Maj" if chord_type == "Major" else f"{root}{'dim' if suffix == '°' else suffix}"
+            options.append(
+                RelativeMoveOption(
+                    label=f"{roman} ({root}{suffix})",
+                    chord_name=chord_name,
+                    target_fret=current_fret,
+                    delta_frets=0,
+                    controllers=stance,
+                    target_strings=set(grip),
+                    description=desc,
+                    roman_degree=roman,
+                    category=cat,
+                    chord_root=root,
+                    chord_type=chord_type,
+                )
+            )
+        return options
 
     @classmethod
     def get_all_same_fret_chords(
@@ -78,57 +136,36 @@ class RelativeMovesEngine:
         and prioritizes full triads over partial chords.
         """
         if filter_mode == "franklin":
-            return cls.get_same_fret_diatonic_hub(current_fret)
+            return cls.get_same_fret_diatonic_hub(current_fret, neck)
 
-        is_c6 = (neck.neck_type == NeckType.C6 or "C6" in neck.name)
+        is_c6 = is_c6_neck(neck)
         tonic_pc = (0 + current_fret) % 12 if is_c6 else (4 + current_fret) % 12
-        tonic_name = format_chord_root(NOTE_NAMES_SHARP[tonic_pc])
+        roles = detect_roles(neck)
 
         if is_c6:
-            candidate_stances: List[Tuple[str, Set[str]]] = [
-                ("Open", set()),
-                ("P5", {"P5"}),
-                ("P6", {"P6"}),
-                ("P7", {"P7"}),
-                ("P8", {"P8"}),
-                ("P5+P6", {"P5", "P6"}),
-                ("P6+P7", {"P6", "P7"}),
-                ("P7+P8", {"P7", "P8"}),
-            ]
+            stance_tokens = _C6_SCAN_STANCES
             candidate_grips = [
                 {7, 6, 5}, {6, 5, 4}, {5, 4, 3}, {4, 3, 2},
                 {8, 7, 6, 5}, {7, 6, 5, 4}, {6, 5, 4, 3},
             ]
+            canonical: Dict[str, Set[str]] = {}
         else:
-            candidate_stances = [
-                ("Open", set()),
-                ("P1+P2", {"P1", "P2"}),    # Priority 1 for IV Major
-                ("P2+LKR", {"P2", "LKR"}),  # Priority 1 for V7 Dominant
-                ("P1", {"P1"}),            # vi Minor
-                ("P2", {"P2"}),
-                ("P3", {"P3"}),            # 6/9
-                ("LKL", {"LKL"}),          # #I dim
-                ("LKV", {"LKV"}),
-                ("LKR", {"LKR"}),
-                ("RKL", {"RKL"}),          # iii Minor
-                ("RKR", {"RKR"}),
-                ("P2+P3", {"P2", "P3"}),    # ii Minor
-                ("P1+P3", {"P1", "P3"}),
-                ("P1+LKL", {"P1", "LKL"}),
-                ("P2+LKL", {"P2", "LKL"}),
-                ("P1+LKR", {"P1", "LKR"}),
-                ("P3+LKR", {"P3", "LKR"}),
-                ("P3+LKL", {"P3", "LKL"}),
-                ("P1+RKL", {"P1", "RKL"}),
-                ("P2+RKL", {"P2", "RKL"}),
-            ]
+            stance_tokens = _E9_SCAN_STANCES
             candidate_grips = [
                 {8, 6, 5}, {6, 5, 4}, {5, 4, 3}, {10, 8, 6},
                 {9, 8, 6, 5}, {9, 6, 5, 4}, {8, 6, 4},
             ]
+            canonical = {}
+            for roman, tokens in _E9_CANONICAL.items():
+                stance = resolve_stance(neck, tokens, roles)
+                if stance is not None:
+                    canonical[roman] = stance
 
-        available_ctrls = set(neck.pedals.keys()) | set(neck.knee_levers.keys())
-        valid_stances = [s for s in candidate_stances if s[1].issubset(available_ctrls)]
+        valid_stances: List[Set[str]] = []
+        for tokens in stance_tokens:
+            stance = resolve_stance(neck, tokens, roles)
+            if stance is not None and stance not in valid_stances:
+                valid_stances.append(stance)
 
         ROMAN_MAJ = {
             0: "I", 1: "bII", 2: "II", 3: "bIII", 4: "III", 5: "IV",
@@ -141,14 +178,11 @@ class RelativeMovesEngine:
 
         best_chord_map: Dict[Tuple[str, str], Tuple[int, RelativeMoveOption]] = {}
 
-        for stance_name, ctrls in valid_stances:
+        for ctrls in valid_stances:
             ctrl_affects: Dict[str, Set[int]] = {}
             for c_id in ctrls:
                 c_obj = neck.pedals.get(c_id) or neck.knee_levers.get(c_id)
-                if c_obj:
-                    ctrl_affects[c_id] = {s for s, delta in c_obj.changes.items() if delta != 0}
-                else:
-                    ctrl_affects[c_id] = set()
+                ctrl_affects[c_id] = {s for s, delta in c_obj.changes.items() if delta != 0} if c_obj else set()
 
             states = FretboardResolver.resolve_neck_state(
                 neck=neck,
@@ -191,6 +225,9 @@ class RelativeMovesEngine:
                 clean_root = format_chord_root(root)
                 root_pc = NOTE_TO_SEMITONE[root]
                 delta_semi = (root_pc - tonic_pc) % 12
+                chord_type = _FAMILY_TO_CHORD_TYPE.get(family, family)
+                if chord_type not in CHORD_FORMULAS:
+                    chord_type = ""
 
                 q_clean = quality.strip()
                 q_low = q_clean.lower()
@@ -251,20 +288,8 @@ class RelativeMovesEngine:
                 # 2. Full 3-string closed triads win over loose shapes
                 # 3. Penalize higher pedal counts only among identical chords
                 score = len(ctrls) * 5
-
-                # Enforce textbook steel pedal combinations
-                if roman == "IV" and ctrls == {"P1", "P2"}:
-                    score -= 500  # P1+P2 is the definitive IV chord
-                elif roman == "V7" and ctrls == {"P2", "LKR"}:
-                    score -= 500  # P2+LKR is the definitive V7 chord
-                elif roman == "I" and len(ctrls) == 0:
-                    score -= 500  # Open bar is the definitive I chord
-                elif roman == "vi" and ctrls == {"P1"}:
-                    score -= 400  # P1 is the definitive vi chord
-                elif roman == "ii" and ctrls == {"P2", "P3"}:
-                    score -= 400  # P2+P3 is the definitive ii chord
-                elif roman == "iii" and ctrls == {"RKL"}:
-                    score -= 400  # RKL is the definitive iii chord
+                if roman in canonical and ctrls == canonical[roman]:
+                    score -= _CANONICAL_BONUS[roman]
 
                 if grip == {8, 6, 5}:
                     score -= 30
@@ -290,6 +315,8 @@ class RelativeMovesEngine:
                     description=desc,
                     roman_degree=roman,
                     category=cat,
+                    chord_root=clean_root,
+                    chord_type=chord_type,
                 )
                 best_chord_map[key] = (score, opt)
 
@@ -306,150 +333,73 @@ class RelativeMovesEngine:
         return results
 
     @classmethod
-    def get_e9_relative_movements(cls, current_fret: int, active_levers: Set[str]) -> List[RelativeMoveOption]:
-        """Calculates Patricia Warnock's E9 relative movement formulas."""
-        base_pc = (4 + current_fret) % 12
-        root_name = format_chord_root(NOTE_NAMES_SHARP[base_pc])
+    def _verified_moves(cls, neck: Neck, current_fret: int, specs) -> List[RelativeMoveOption]:
+        """specs: (label, delta, tokens, strings, root, chord_type, chord_name, description)."""
+        roles = detect_roles(neck)
         moves: List[RelativeMoveOption] = []
-
-        f_af = current_fret + 3
-        if f_af <= 24:
+        for label, delta, tokens, strings, root, chord_type, chord_name, desc in specs:
+            target = current_fret + delta
+            if not 0 <= target <= 24:
+                continue
+            stance = resolve_stance(neck, tokens, roles)
+            if stance is None or not grip_matches_chord(neck, target, stance, strings, root, chord_type):
+                continue
             moves.append(
                 RelativeMoveOption(
-                    label="+3 Frets (A + LKL)",
-                    chord_name=f"{root_name} Maj (I)",
-                    target_fret=f_af,
-                    delta_frets=3,
-                    controllers={"P1", "LKL"},
-                    target_strings={6, 5, 4},
-                    description=f"Slide +3 to Fret {f_af} with A pedal & F lever for {root_name} Major (I)",
+                    label=label,
+                    chord_name=chord_name,
+                    target_fret=target,
+                    delta_frets=delta,
+                    controllers=stance,
+                    target_strings=set(strings),
+                    description=desc.format(fret=target),
+                    chord_root=root,
+                    chord_type=chord_type,
                 )
             )
-
-        f_ab = current_fret + 2
-        if f_ab <= 24:
-            v_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 7) % 12])
-            moves.append(
-                RelativeMoveOption(
-                    label="+2 Frets (A + B)",
-                    chord_name=f"{v_name} Maj (V)",
-                    target_fret=f_ab,
-                    delta_frets=2,
-                    controllers={"P1", "P2"},
-                    target_strings={6, 5, 4},
-                    description=f"Slide +2 to Fret {f_ab} with A & B pedals for Dominant {v_name} Major (V)",
-                )
-            )
-
-        f_bc = current_fret - 2
-        if f_bc >= 0:
-            moves.append(
-                RelativeMoveOption(
-                    label="-2 Frets (B + C Minor)",
-                    chord_name=f"{root_name}m (i)",
-                    target_fret=f_bc,
-                    delta_frets=-2,
-                    controllers={"P2", "P3"},
-                    target_strings={6, 5, 4},
-                    description=f"Slide -2 to Fret {f_bc} with B & C pedals for {root_name} minor (i)",
-                )
-            )
-
-        f_d = current_fret - 4 if (current_fret - 4 >= 0) else (current_fret + 8)
-        delta_d = f_d - current_fret
-        if 0 <= f_d <= 24:
-            sign_str = f"+{delta_d}" if delta_d > 0 else f"{delta_d}"
-            moves.append(
-                RelativeMoveOption(
-                    label=f"{sign_str} Frets (D Lever Minor)",
-                    chord_name=f"{root_name}m (i)",
-                    target_fret=f_d,
-                    delta_frets=delta_d,
-                    controllers={"LKR"},
-                    target_strings={6, 5, 4},
-                    description=f"Slide {sign_str} to Fret {f_d} with D lever for {root_name} minor (i)",
-                )
-            )
-
         return moves
 
     @classmethod
-    def get_c6_relative_movements(cls, current_fret: int) -> List[RelativeMoveOption]:
-        """Calculates Petria Barndo's C6 relative movement formulas."""
+    def get_e9_relative_movements(
+        cls, current_fret: int, active_levers: Set[str], neck: Optional[Neck] = None
+    ) -> List[RelativeMoveOption]:
+        """Patricia Warnock's E9 relative movement formulas (verified on the neck)."""
+        neck = neck if neck is not None else _default_neck()
+        base_pc = (4 + current_fret) % 12
+        root = _root_name(base_pc)
+        v_root = _root_name(base_pc + 7)
+        d_delta = -4 if current_fret - 4 >= 0 else 8
+        d_sign = f"+{d_delta}" if d_delta > 0 else f"{d_delta}"
+        specs = [
+            ("+3 Frets (A + LKL)", 3, ("A", "F"), {6, 5, 4}, root, "Major", f"{root} Maj (I)",
+             "Slide +3 to Fret {fret} with A pedal & F lever for " + f"{root} Major (I)"),
+            ("+2 Frets (A + B)", 2, ("A", "B"), {6, 5, 4}, v_root, "Major", f"{v_root} Maj (V)",
+             "Slide +2 to Fret {fret} with A & B pedals for Dominant " + f"{v_root} Major (V)"),
+            ("-2 Frets (B + C Minor)", -2, ("B", "C"), {6, 5, 4}, root, "Minor", f"{root}m (i)",
+             "Slide -2 to Fret {fret} with B & C pedals for " + f"{root} minor (i)"),
+            (f"{d_sign} Frets (D Lever Minor)", d_delta, ("D",), {6, 5, 4}, root, "Minor", f"{root}m (i)",
+             f"Slide {d_sign} to Fret " + "{fret}" + f" with D lever for {root} minor (i)"),
+        ]
+        return cls._verified_moves(neck, current_fret, specs)
+
+    @classmethod
+    def get_c6_relative_movements(cls, current_fret: int, neck: Optional[Neck] = None) -> List[RelativeMoveOption]:
+        """Petria Barndo's C6 relative movement formulas (verified on the neck)."""
+        neck = neck if neck is not None else _default_neck(c6=True)
         base_pc = (0 + current_fret) % 12
-        moves: List[RelativeMoveOption] = []
-
-        iv_name = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 5) % 12])
-        moves.append(
-            RelativeMoveOption(
-                label="Same Fret (Pedal 6)",
-                chord_name=f"{iv_name} Maj (IV)",
-                target_fret=current_fret,
-                delta_frets=0,
-                controllers={"P6"},
-                target_strings={4, 3, 2},
-                description=f"Same fret {iv_name} Major with Pedal 6 on strings 4-3-2",
-            )
-        )
-
-        f_p6_up = current_fret + 7
-        if f_p6_up <= 24:
-            c_name = format_chord_root(NOTE_NAMES_SHARP[base_pc])
-            moves.append(
-                RelativeMoveOption(
-                    label="+7 Frets (Pedal 6)",
-                    chord_name=f"{c_name} Maj (1st Inv)",
-                    target_fret=f_p6_up,
-                    delta_frets=7,
-                    controllers={"P6"},
-                    target_strings={4, 3, 2},
-                    description=f"Slide +7 with Pedal 6 for {c_name} Major 1st Inversion",
-                )
-            )
-
-        f_p8 = current_fret + 3
-        if f_p8 <= 24:
-            c_name = format_chord_root(NOTE_NAMES_SHARP[base_pc])
-            moves.append(
-                RelativeMoveOption(
-                    label="+3 Frets (Pedal 8)",
-                    chord_name=f"{c_name} Maj (2nd Inv)",
-                    target_fret=f_p8,
-                    delta_frets=3,
-                    controllers={"P8"},
-                    target_strings={9, 8, 7},
-                    description=f"Slide +3 with Pedal 8 for {c_name} Major 2nd Inversion",
-                )
-            )
-
-        f_p6_min = current_fret - 3
-        if f_p6_min >= 0:
-            rel_min = format_chord_root(NOTE_NAMES_SHARP[(base_pc + 9) % 12])
-            moves.append(
-                RelativeMoveOption(
-                    label="-3 Frets (Pedal 6 Minor)",
-                    chord_name=f"{rel_min}m (vi)",
-                    target_fret=f_p6_min,
-                    delta_frets=-3,
-                    controllers={"P6"},
-                    target_strings={7, 6, 5},
-                    description=f"Slide -3 with Pedal 6 for {rel_min} minor",
-                )
-            )
-
-        f_p7 = current_fret + 5
-        if f_p7 <= 24:
-            c6_name = format_chord_root(NOTE_NAMES_SHARP[base_pc])
-            moves.append(
-                RelativeMoveOption(
-                    label="+5 Frets (Pedal 7 Maj6)",
-                    chord_name=f"{c6_name}6",
-                    target_fret=f_p7,
-                    delta_frets=5,
-                    controllers={"P7"},
-                    target_strings={5, 4, 3, 2},
-                    description=f"Slide +5 with Pedal 7 for {c6_name} Major 6 block",
-                )
-            )
-
-        return moves
+        c_name = _root_name(base_pc)
+        iv_name = _root_name(base_pc + 5)
+        rel_min = _root_name(base_pc + 9)
+        specs = [
+            ("Same Fret (Pedal 6)", 0, ("C6P6",), {4, 3, 2}, iv_name, "Major", f"{iv_name} Maj (IV)",
+             f"Same fret {iv_name} Major with Pedal 6 on strings 4-3-2"),
+            ("+7 Frets (Pedal 6)", 7, ("C6P6",), {4, 3, 2}, c_name, "Major", f"{c_name} Maj (1st Inv)",
+             f"Slide +7 with Pedal 6 for {c_name} Major 1st Inversion"),
+            ("+3 Frets (Pedal 8)", 3, ("C6P8",), {9, 8, 7}, c_name, "Major", f"{c_name} Maj (2nd Inv)",
+             f"Slide +3 with Pedal 8 for {c_name} Major 2nd Inversion"),
+            ("-3 Frets (Pedal 6 Minor)", -3, ("C6P6",), {7, 6, 5}, rel_min, "Minor", f"{rel_min}m (vi)",
+             f"Slide -3 with Pedal 6 for {rel_min} minor"),
+            ("+5 Frets (Pedal 7 Maj6)", 5, ("C6P7",), {5, 4, 3, 2}, c_name, "Major 6th", f"{c_name}6",
+             f"Slide +5 with Pedal 7 for {c_name} Major 6 block"),
+        ]
+        return cls._verified_moves(neck, current_fret, specs)

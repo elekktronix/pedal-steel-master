@@ -12,12 +12,12 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP
+from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, to_root_name
 from core.voicing_solver import VoicingSolver
 
 
 class HarmonicTargetPanel(QWidget):
-    target_changed = Signal(str, str)  # root, chord_type
+    target_changed = Signal(object, object)  # (root, chord_type) or (None, None) when root is 'None'
     reset_requested = Signal()         # Reset pedals/levers
     find_voicings_requested = Signal() # Launch chord position solver
 
@@ -110,8 +110,9 @@ class HarmonicTargetPanel(QWidget):
     def set_target(self, root: str, chord_type: str):
         self.combo_root.blockSignals(True)
         self.combo_chord.blockSignals(True)
-        if root in NOTE_NAMES_SHARP:
-            self.combo_root.setCurrentText(root)
+        sharp_root = to_root_name(root)  # accepts flats like "Bb" (D-05)
+        if sharp_root:
+            self.combo_root.setCurrentText(sharp_root)
         if chord_type in CHORD_FORMULAS:
             self.combo_chord.setCurrentText(chord_type)
         self.combo_root.blockSignals(False)

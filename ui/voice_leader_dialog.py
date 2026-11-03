@@ -102,6 +102,7 @@ class MetronomeChirp:
 
 class VoiceLeaderDialog(QDialog):
     voicing_path_applied = Signal(list)
+    voicing_applied = Signal(int, list, list)  # fret, controllers, grip strings
 
     def __init__(self, neck: Neck, parent=None):
         super().__init__(parent)
@@ -534,27 +535,10 @@ class VoiceLeaderDialog(QDialog):
 
     def _apply_single_voicing_to_main(self, v):
         """Immediately transmits the selected voicing to the main visualizer."""
-        if not v or not self.parent():
+        if not v:
             return
-        main_win = self.parent()
-        if hasattr(main_win, "canvas"):
-            main_win.canvas.set_bar_fret(v.fret)
-            main_win._sync_fret_widgets(v.fret)
-
-            for pid, btn in main_win.lever_panel.pedal_buttons.items():
-                btn.blockSignals(True)
-                btn.setChecked(pid in v.engaged_levers)
-                btn.blockSignals(False)
-            for lid, btn in main_win.lever_panel.lever_buttons.items():
-                btn.blockSignals(True)
-                btn.setChecked(lid in v.engaged_levers)
-                btn.blockSignals(False)
-
-            main_win.canvas.set_engaged_levers(set(v.engaged_levers))
-            main_win._apply_pocket_preset(set(v.grip_strings))
-            main_win._play_pocket(roll=False)
-            if hasattr(main_win, "_update_relative_moves_hub"):
-                main_win._update_relative_moves_hub()
+        # MainWindow.apply_stance updates canvas, lever buttons, lever panel state and audio (D-04).
+        self.voicing_applied.emit(v.fret, list(v.engaged_levers), list(v.grip_strings))
 
     def _generate_tablature(self):
         if not self.solved_voicings or all(v is None for v in self.solved_voicings):

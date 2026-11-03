@@ -31,14 +31,14 @@ class PermutationTrainerDialog(QDialog):
         self.setWindowTitle("Franklin 24 Right-Hand Picking & Blocking Trainer")
         self.resize(840, 560)
 
-        # Ensure we have 4 valid strings (default to Franklin Group 2: 4, 5, 6, 8)[cite: 16]
+        # Ensure we have 4 valid strings (default to Franklin Group 2: 4, 5, 6, 8)
         pocket_list = sorted(list(active_pocket), reverse=True)
         if len(pocket_list) >= 4:
             self.active_strings = pocket_list[:4]
         else:
             self.active_strings = [8, 6, 5, 4]
 
-        self.current_perm_id = 2  # Default to T-I-M-T Standard Forward Roll[cite: 60]
+        self.current_perm_id = 2  # Default to T-I-M-T Standard Forward Roll
         self.events: List[PickEvent] = []
         self.current_event_idx = 0
 
@@ -236,7 +236,7 @@ class PermutationTrainerDialog(QDialog):
             states = self.parent_window.canvas.active_states
             match_state = next((s for s in states if s.string_number == ev.string_number), None)
             if match_state:
-                self.parent_window.audio.play_note(match_state.active_midi)
+                self.parent_window.audio.play_note(match_state.active_midi, match_state.string_number)
 
         # 3. Update Visual Highlight Lane
         sorted_strs = sorted(self.active_strings)

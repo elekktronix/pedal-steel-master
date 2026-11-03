@@ -76,10 +76,11 @@ class TabGenerator:
                 s_prefix = f"{str_num:2d} |---"
                 str_row = s_prefix
                 for s in chunk:
+                    # Every column is exactly col_width wide so it lines up with the headers (D-16).
                     if str_num in s.grip_strings:
-                        cell = f"-{s.fret:<2d}-------"
+                        cell = f"-{s.fret}".ljust(col_width, "-")
                     else:
-                        cell = "----------"
+                        cell = "-" * col_width
                     str_row += cell[:col_width]
                 str_row += "|"
                 lines.append(str_row)

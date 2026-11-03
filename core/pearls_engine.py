@@ -2,6 +2,9 @@
 
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Set, Tuple
+from core.models import Neck
+from core.resolver import FretboardResolver
+from core.stances import detect_roles, resolve_stance
 from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, SCALE_FORMULAS
 
 
@@ -32,10 +35,19 @@ class PearlsEngine:
         track_name: str = "Strings 3 & 5 (6ths / 3rds)",
         scale_type: str = "Major (Ionian)",
         max_fret: int = 22,
+        neck: Optional[Neck] = None,
     ) -> List[PearlStep]:
-        """Calculates consecutive physical slide steps along the fretboard for the selected pair."""
+        """Calculates consecutive physical slide steps along the fretboard for the selected pair.
+
+        Pitches come from the resolver for the given neck (standard E9 if none), and the A/B/F/D
+        stances are mapped to that neck's controllers by function (D-23).
+        """
         if key_root not in NOTE_TO_SEMITONE:
             return []
+        if neck is None:
+            from core import presets
+
+            neck = presets.build_standard_emmons_e9_10()
 
         string_pair = cls.TWIN_TRACKS.get(track_name, (3, 5))
         key_pc = NOTE_TO_SEMITONE[key_root]
@@ -44,27 +56,28 @@ class PearlsEngine:
         pearl_steps: List[PearlStep] = []
         prev_fret: Optional[int] = None
 
-        # Candidate controller stances for twin tracks on E9:
-        # Open, Pedal A, Pedal B, Pedals A+B, LKL (F Lever), LKR (D Lever)
-        stances: List[Tuple[str, Set[str]]] = [
-            ("Open", set()),
-            ("A Pedal", {"P1"}),
-            ("B Pedal", {"P2"}),
-            ("A & B", {"P1", "P2"}),
-            ("F Lever", {"LKL"}),
-            ("D Lever", {"LKR"}),
-        ]
+        # Candidate stances for twin tracks: Open, Pedal A, Pedal B, Pedals A+B, F Lever, D Lever
+        roles = detect_roles(neck)
+        stances: List[Tuple[str, Set[str]]] = []
+        for stance_name, tokens in [
+            ("Open", ()), ("A Pedal", ("A",)), ("B Pedal", ("B",)),
+            ("A & B", ("A", "B")), ("F Lever", ("F",)), ("D Lever", ("D",)),
+        ]:
+            stance = resolve_stance(neck, tokens, roles)
+            if stance is not None:
+                stances.append((stance_name, stance))
+        if any(s not in {sp.string_number for sp in neck.open_tuning} for s in string_pair):
+            return []
 
         # Scan each fret 0 to max_fret
         for fret in range(0, max_fret + 1):
             for stance_name, ctrls in stances:
-                # Calculate sounding pitch on string_pair[0] and string_pair[1]
-                # E9 Standard open pitches (MIDI): Str 3 = G#4 (68), Str 4 = E4 (64), Str 5 = B3 (59), Str 8 = E3 (52)
-                p1_base = cls._get_e9_string_base_midi(string_pair[0]) + fret
-                p2_base = cls._get_e9_string_base_midi(string_pair[1]) + fret
-
-                p1_pitch = p1_base + cls._get_controller_delta(string_pair[0], ctrls)
-                p2_pitch = p2_base + cls._get_controller_delta(string_pair[1], ctrls)
+                states = {
+                    s.string_number: s
+                    for s in FretboardResolver.resolve_neck_state(neck, fret, ctrls)
+                }
+                p1_pitch = states[string_pair[0]].active_midi
+                p2_pitch = states[string_pair[1]].active_midi
 
                 p1_pc = p1_pitch % 12
                 p2_pc = p2_pitch % 12
@@ -100,35 +113,6 @@ class PearlsEngine:
 
         pearl_steps.sort(key=lambda s: (s.fret, len(s.controllers)))
         return pearl_steps
-
-    @staticmethod
-    def _get_e9_string_base_midi(str_num: int) -> int:
-        open_e9 = {
-            1: 66,  # F#4
-            2: 63,  # D#4
-            3: 68,  # G#4
-            4: 64,  # E4
-            5: 59,  # B3
-            6: 56,  # G#3
-            7: 54,  # F#3
-            8: 52,  # E3
-            9: 50,  # D3
-            10: 47, # B2
-        }
-        return open_e9.get(str_num, 60)
-
-    @staticmethod
-    def _get_controller_delta(str_num: int, controllers: Set[str]) -> int:
-        delta = 0
-        if "P1" in controllers and str_num in (5, 10):
-            delta += 2  # Pedal A raises B to C#
-        if "P2" in controllers and str_num in (3, 6):
-            delta += 1  # Pedal B raises G# to A
-        if "LKL" in controllers and str_num in (4, 8):
-            delta += 1  # F Lever raises E to F
-        if "LKR" in controllers and str_num in (4, 8):
-            delta -= 1  # D Lever lowers E to Eb
-        return delta
 
     @staticmethod
     def _get_interval_name(semitones: int) -> str:

@@ -11,37 +11,64 @@ from core.voicing_solver import VoicingMatch, VoicingSolver
 SolvedVoicing = VoicingMatch
 
 CHORD_TYPE_MAP = {
+    "": "Major",
+    "maj": "Major",
+    "M": "Major",
+    "m": "Minor",
+    "min": "Minor",
+    "-": "Minor",
     "Minor 7": "Minor 7th",
     "m7": "Minor 7th",
+    "min7": "Minor 7th",
+    "-7": "Minor 7th",
     "Major 7": "Major 7th",
     "maj7": "Major 7th",
+    "M7": "Major 7th",
     "7": "Dominant 7th",
     "Dominant 7": "Dominant 7th",
-    "Dominant 7th": "Dominant 7th",
-    "Major": "Major",
-    "Minor": "Minor",
-    "Diminished": "Diminished",
+    "dom7": "Dominant 7th",
+    "9": "Dominant 9th",
+    "Dominant 9": "Dominant 9th",
+    "6": "Major 6th",
+    "Major 6": "Major 6th",
+    "m6": "Minor 6th",
+    "Minor 6": "Minor 6th",
     "dim": "Diminished",
+    "°": "Diminished",
+    "dim7": "Diminished 7th",
+    "°7": "Diminished 7th",
     "m7b5": "Half-Diminished",
-    "Half-Diminished": "Half-Diminished",
+    "ø": "Half-Diminished",
+    "ø7": "Half-Diminished",
+    "aug": "Augmented",
+    "+": "Augmented",
+    "sus4": "Sus4",
+    "sus": "Sus4",
+    "69": "6/9",
 }
 
 
+class UnknownChordTypeError(ValueError):
+    pass
+
+
 def normalize_chord_type(raw_type: str) -> str:
-    if raw_type in CHORD_FORMULAS:
-        return raw_type
-    mapped = CHORD_TYPE_MAP.get(raw_type)
+    """Maps a chord type alias to a CHORD_FORMULAS key. Raises UnknownChordTypeError instead of
+    silently substituting 'Major' (D-11)."""
+    raw = (raw_type or "").strip()
+    if raw in CHORD_FORMULAS:
+        return raw
+    mapped = CHORD_TYPE_MAP.get(raw)
     if mapped and mapped in CHORD_FORMULAS:
         return mapped
-    variants = [
-        raw_type + "th",
-        raw_type.replace(" 7", " 7th"),
-        raw_type.replace(" 7th", " 7"),
-    ]
-    for v in variants:
+    for v in (raw + "th", raw.replace(" 7", " 7th"), raw.replace(" 7th", " 7")):
         if v in CHORD_FORMULAS:
             return v
-    return "Major"
+    lowered = {k.lower(): v for k, v in CHORD_TYPE_MAP.items() if k not in ("M", "M7")}
+    lowered.update({k.lower(): k for k in CHORD_FORMULAS})
+    if raw.lower() in lowered:
+        return lowered[raw.lower()]
+    raise UnknownChordTypeError(f"Unknown chord type: {raw_type!r}")
 
 
 @dataclass
@@ -178,9 +205,15 @@ class VoiceLeadingEngine:
 
             candidates_per_step.append(in_range)
 
+        # Chords without any candidate stay None in their own measure; the DP runs over the rest
+        # so the result always has exactly one entry per measure (D-12).
+        solvable = [k for k, c in enumerate(candidates_per_step) if c]
+        measure_of_step = [measures_with_chords[k][0] for k in solvable]
+        candidates_per_step = [candidates_per_step[k] for k in solvable]
+
         num_steps = len(candidates_per_step)
-        if num_steps == 0 or any(len(c) == 0 for c in candidates_per_step):
-            return [c[0] if c else None for c in candidates_per_step]
+        if num_steps == 0:
+            return [None] * len(progression.measures)
 
         dp: List[Dict[int, Tuple[float, Optional[int]]]] = [{} for _ in range(num_steps)]
 
@@ -262,8 +295,8 @@ class VoiceLeadingEngine:
         path.reverse()
 
         solved_map: Dict[int, VoicingMatch] = {}
-        for (step_idx, _), cand_idx in zip(measures_with_chords, path):
-            solved_map[step_idx] = candidates_per_step[len(solved_map)][cand_idx]
+        for step, (measure_idx, cand_idx) in enumerate(zip(measure_of_step, path)):
+            solved_map[measure_idx] = candidates_per_step[step][cand_idx]
 
         final_result: List[Optional[VoicingMatch]] = []
         for idx in range(len(progression.measures)):

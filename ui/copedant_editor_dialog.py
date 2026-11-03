@@ -3,6 +3,7 @@ fixed-geometry steppers, Franklin P1 vs P4 insertion, persistent disk saving,
 interactive Mechanical Splits (with Control 1 & Control 2 dropdowns), and dedicated Half-Stops configuration.
 """
 
+import logging
 from copy import deepcopy
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -42,9 +43,14 @@ from core.models import (
     StringPitch,
     detect_potential_half_stops,
     detect_potential_splits,
+    migrate_half_stop_tokens,
+    migrate_legacy_ids,
+    shift_pedal_ids,
 )
 from core.profile_manager import ProfileManager
 from core.theory import NOTE_NAMES_SHARP, midi_to_note_name, note_to_midi
+
+log = logging.getLogger(__name__)
 
 STANDARDIZED_KNEE_LEVERS: List[Tuple[str, str, str]] = [
     ("LKL", "Left Knee Left", "Left Knee"),
@@ -75,6 +81,11 @@ class CopedantEditorDialog(QDialog):
         self.neck = deepcopy(neck)
         self.guitar = guitar
         self.current_neck_idx = current_neck_idx
+        # Unapplied working copies per neck index (edits survive switching necks in the combo).
+        self._working: Dict[int, Neck] = {}
+        # True when guitar.necks was changed structurally (Duplicate / Save as Profile),
+        # which happens immediately, even if the dialog is later cancelled.
+        self.guitar_changed: bool = False
 
         self._migrate_legacy_levers()
 
@@ -96,15 +107,9 @@ class CopedantEditorDialog(QDialog):
             self.tabs.setCurrentWidget(self.tab_matrix)
 
     def _migrate_legacy_levers(self):
-        if "VL" in self.neck.knee_levers and "LKV" not in self.neck.knee_levers:
-            ch = self.neck.knee_levers.pop("VL")
-            ch.id = "LKV"
-            ch.label = "LKV"
-            self.neck.knee_levers["LKV"] = ch
-
-        retired = {"VL2", "LKR2", "RKL2", "VR", "VR2", "RKRHS"}
-        for r_id in retired:
-            self.neck.knee_levers.pop(r_id, None)
+        # Core migrations rewrite split/half-stop references together with the controllers (D-07).
+        migrate_legacy_ids(self.neck)
+        migrate_half_stop_tokens(self.neck)
 
     def _init_ui(self):
         root = QVBoxLayout(self)
@@ -374,50 +379,14 @@ class CopedantEditorDialog(QDialog):
         self.splits_table.insertRow(row)
 
         # 0. String Selector Dropdown
-        combo_str = QComboBox()
-        open_notes = {s.string_number: s.note_name for s in getattr(self.neck, "open_tuning", [])}
-        str_count = self.neck.string_count if self.neck else 10
-        sel_idx = 0
-        for s_idx in range(1, str_count + 1):
-            note = open_notes.get(s_idx, "")
-            label = f"String {s_idx} ({note})" if note else f"String {s_idx}"
-            combo_str.addItem(label, s_idx)
-            if s_idx == sp.string_number:
-                sel_idx = s_idx - 1
-        combo_str.setCurrentIndex(sel_idx)
-        self.splits_table.setCellWidget(row, 0, combo_str)
+        self.splits_table.setCellWidget(row, 0, self._build_string_combo(sp.string_number))
 
-        available_ctrls = self._get_single_controllers()
-
-        # 1. Control 1 Dropdown
-        combo_c1 = QComboBox()
-        combo_c1.setStyleSheet("font-weight: bold;")
-        for disp, cid in available_ctrls:
-            combo_c1.addItem(disp, cid)
-
+        # 1-2. Control 1 & Control 2 Dropdowns (half-stop tokens like "P3_HALF" allowed)
+        available_ctrls = self._get_single_controllers(include_half_tokens=True)
         c1_target = sp.controllers[0] if len(sp.controllers) > 0 else "P1"
-        idx1 = 0
-        for i in range(combo_c1.count()):
-            if combo_c1.itemData(i) == c1_target:
-                idx1 = i
-                break
-        combo_c1.setCurrentIndex(idx1)
-        self.splits_table.setCellWidget(row, 1, combo_c1)
-
-        # 2. Control 2 Dropdown
-        combo_c2 = QComboBox()
-        combo_c2.setStyleSheet("font-weight: bold;")
-        for disp, cid in available_ctrls:
-            combo_c2.addItem(disp, cid)
-
         c2_target = sp.controllers[1] if len(sp.controllers) > 1 else "LKR"
-        idx2 = 0
-        for i in range(combo_c2.count()):
-            if combo_c2.itemData(i) == c2_target:
-                idx2 = i
-                break
-        combo_c2.setCurrentIndex(idx2)
-        self.splits_table.setCellWidget(row, 2, combo_c2)
+        self.splits_table.setCellWidget(row, 1, self._build_choice_combo(available_ctrls, c1_target, bold=True))
+        self.splits_table.setCellWidget(row, 2, self._build_choice_combo(available_ctrls, c2_target, bold=True))
 
         # 3. Resolved Net Delta
         spin = QSpinBox()
@@ -473,9 +442,11 @@ class CopedantEditorDialog(QDialog):
             if not isinstance(cb_str, QComboBox) or not isinstance(cb_c1, QComboBox) or not isinstance(cb_c2, QComboBox):
                 continue
 
-            str_num = cb_str.currentData() or 1
-            c1 = cb_c1.currentData() or cb_c1.currentText().split("(")[0].strip()
-            c2 = cb_c2.currentData() or cb_c2.currentText().split("(")[0].strip()
+            str_num = cb_str.currentData()
+            c1 = cb_c1.currentData()
+            c2 = cb_c2.currentData()
+            if str_num is None or not c1 or not c2:
+                continue
             delta = spin.value() if isinstance(spin, QSpinBox) else 0
             is_act = c_box_widget.findChild(QCheckBox).isChecked() if c_box_widget else True
             desc = edit_desc.text().strip() if isinstance(edit_desc, QLineEdit) else ""
@@ -537,7 +508,30 @@ class CopedantEditorDialog(QDialog):
         btn_h.addStretch()
         vbox.addLayout(btn_h)
 
-    def _get_single_controllers(self) -> List[Tuple[str, str]]:
+    def _build_choice_combo(self, items: List[Tuple[str, object]], selected, bold: bool = False) -> QComboBox:
+        """Combo of (display, data) items. A selected value that is not among the items is kept
+        as a flagged entry instead of silently falling back to the first item (D-07)."""
+        combo = QComboBox()
+        if bold:
+            combo.setStyleSheet("font-weight: bold;")
+        for disp, data in items:
+            combo.addItem(disp, data)
+        idx = combo.findData(selected)
+        if idx < 0:
+            combo.addItem(f"⚠ {selected} (undefined)", selected)
+            idx = combo.count() - 1
+        combo.setCurrentIndex(idx)
+        return combo
+
+    def _build_string_combo(self, selected_string: int) -> QComboBox:
+        open_notes = {s.string_number: s.note_name for s in getattr(self.neck, "open_tuning", [])}
+        items: List[Tuple[str, object]] = []
+        for s_idx in range(1, self.neck.string_count + 1):
+            note = open_notes.get(s_idx, "")
+            items.append((f"String {s_idx} ({note})" if note else f"String {s_idx}", s_idx))
+        return self._build_choice_combo(items, int(selected_string))
+
+    def _get_single_controllers(self, include_half_tokens: bool = False) -> List[Tuple[str, str]]:
         items: List[Tuple[str, str]] = []
         for pid in sorted(self.neck.pedals.keys(), key=lambda k: int(k[1:]) if k[1:].isdigit() else 99):
             p = self.neck.pedals[pid]
@@ -549,6 +543,12 @@ class CopedantEditorDialog(QDialog):
             l = self.neck.knee_levers[lid]
             lbl = f"{lid} ({l.label})" if l.label else lid
             items.append((lbl, lid))
+
+        if include_half_tokens:
+            half_ids = sorted({h.controller_id for h in getattr(self.neck, "half_stops", [])})
+            for cid in half_ids:
+                if cid in self.neck.pedals or cid in self.neck.knee_levers:
+                    items.append((f"{cid} half-stop", f"{cid}_HALF"))
         return items
 
     def _refresh_half_stops_tab(self):
@@ -560,31 +560,9 @@ class CopedantEditorDialog(QDialog):
         row = self.half_stops_table.rowCount()
         self.half_stops_table.insertRow(row)
 
-        combo_ctrl = QComboBox()
-        combo_ctrl.setStyleSheet("font-weight: bold;")
-        for disp, cid in self._get_single_controllers():
-            combo_ctrl.addItem(disp, cid)
-
-        match_idx = 0
-        for i in range(combo_ctrl.count()):
-            if combo_ctrl.itemData(i) == rule.controller_id:
-                match_idx = i
-                break
-        combo_ctrl.setCurrentIndex(match_idx)
+        combo_ctrl = self._build_choice_combo(self._get_single_controllers(), rule.controller_id, bold=True)
         self.half_stops_table.setCellWidget(row, 0, combo_ctrl)
-
-        combo_str = QComboBox()
-        open_notes = {s.string_number: s.note_name for s in getattr(self.neck, "open_tuning", [])}
-        str_count = self.neck.string_count if self.neck else 10
-        sel_idx = 0
-        for s_idx in range(1, str_count + 1):
-            note = open_notes.get(s_idx, "")
-            label = f"String {s_idx} ({note})" if note else f"String {s_idx}"
-            combo_str.addItem(label, s_idx)
-            if s_idx == rule.string_number:
-                sel_idx = s_idx - 1
-        combo_str.setCurrentIndex(sel_idx)
-        self.half_stops_table.setCellWidget(row, 1, combo_str)
+        self.half_stops_table.setCellWidget(row, 1, self._build_string_combo(rule.string_number))
 
         spin = QSpinBox()
         spin.setRange(-4, 4)
@@ -636,8 +614,10 @@ class CopedantEditorDialog(QDialog):
             if not isinstance(cb_ctrl, QComboBox) or not isinstance(cb_str, QComboBox):
                 continue
 
-            cid = cb_ctrl.currentData() or cb_ctrl.currentText().split("(")[0].strip()
-            str_num = cb_str.currentData() or 1
+            cid = cb_ctrl.currentData()
+            str_num = cb_str.currentData()
+            if not cid or str_num is None:
+                continue
             delta = spin.value() if isinstance(spin, QSpinBox) else 1
             is_act = c_box_widget.findChild(QCheckBox).isChecked() if c_box_widget else True
             desc = edit.text().strip() if isinstance(edit, QLineEdit) else ""
@@ -683,35 +663,43 @@ class CopedantEditorDialog(QDialog):
         is_c6 = (n_type == "C6")
         self.cb_c6_offset.setVisible(is_c6)
 
-    def _toggle_c6_pedal_offset(self, checked: bool):
-        pedal_keys = sorted(list(self.neck.pedals.keys()), key=lambda k: int(k[1:]) if k[1:].isdigit() else 99)
-        if checked:
-            new_pedals: Dict[str, CopedantChange] = {}
-            new_pedals["P1"] = CopedantChange(id="P1", label="P1 (Franklin)", changes={})
-            for p_id in pedal_keys:
-                if p_id[1:].isdigit():
-                    old_num = int(p_id[1:])
-                    new_id = f"P{old_num + 1}"
-                    old_ch = self.neck.pedals[p_id]
-                    new_pedals[new_id] = CopedantChange(id=new_id, label=new_id, changes=dict(old_ch.changes))
-                else:
-                    new_pedals[p_id] = self.neck.pedals[p_id]
+    def _has_franklin_p1(self) -> bool:
+        return "P1" in self.neck.pedals and "Franklin" in self.neck.pedals["P1"].label
+
+    def _set_franklin_p1(self, enabled: bool, franklin_changes: Optional[Dict[int, int]] = None):
+        """Inserts or removes a Franklin pedal at P1, renumbering the other pedals and remapping
+        every split / half-stop reference through core (D-09)."""
+        if enabled == self._has_franklin_p1():
+            return
+        # Flush table edits into the model so the remap sees them, then rebuild the tables.
+        self._save_splits_from_ui()
+        self._save_half_stops_from_ui()
+
+        if enabled:
+            shift_pedal_ids(self.neck, +1)
+            new_pedals: Dict[str, CopedantChange] = {
+                "P1": CopedantChange(id="P1", label="P1 (Franklin)", changes=dict(franklin_changes or {}))
+            }
+            new_pedals.update(self.neck.pedals)
             self.neck.pedals = new_pedals
         else:
-            new_pedals = {}
-            for p_id in pedal_keys:
-                if p_id == "P1" and "Franklin" in self.neck.pedals["P1"].label:
-                    continue
-                if p_id[1:].isdigit():
-                    num = int(p_id[1:])
-                    new_id = f"P{max(1, num - 1)}"
-                    old_ch = self.neck.pedals[p_id]
-                    new_pedals[new_id] = CopedantChange(id=new_id, label=new_id, changes=dict(old_ch.changes))
-                else:
-                    new_pedals[p_id] = self.neck.pedals[p_id]
-            self.neck.pedals = new_pedals
+            del self.neck.pedals["P1"]
+            # Rules that referenced the removed Franklin pedal no longer have a controller.
+            self.neck.splits = [
+                s for s in self.neck.splits if not any(c.replace("_HALF", "") == "P1" for c in s.controllers)
+            ]
+            self.neck.half_stops = [h for h in self.neck.half_stops if h.controller_id != "P1"]
+            shift_pedal_ids(self.neck, -1)
 
+        self.cb_c6_offset.blockSignals(True)
+        self.cb_c6_offset.setChecked(self._has_franklin_p1())
+        self.cb_c6_offset.blockSignals(False)
         self._rebuild_matrix_table()
+        self._refresh_splits_tab()
+        self._refresh_half_stops_tab()
+
+    def _toggle_c6_pedal_offset(self, checked: bool):
+        self._set_franklin_p1(checked)
 
     def _on_lever_toggled(self):
         for lid, cb in self.lever_checkboxes.items():
@@ -1018,31 +1006,8 @@ class CopedantEditorDialog(QDialog):
         self._append_standard_pedal(f"P{next_num}")
 
     def _insert_franklin_p1(self):
-        pedal_keys = sorted(list(self.neck.pedals.keys()), key=lambda k: int(k[1:]) if k[1:].isdigit() else 99)
-        new_pedals: Dict[str, CopedantChange] = {}
-
         is_e9 = (self.neck.neck_type == NeckType.E9 or "E9" in self.neck.name)
-        franklin_changes = {5: -1, 6: -2} if is_e9 else {}
-        new_pedals["P1"] = CopedantChange(id="P1", label="P1 (Franklin)", changes=franklin_changes)
-
-        for p_id in pedal_keys:
-            if p_id[1:].isdigit():
-                old_num = int(p_id[1:])
-                new_id = f"P{old_num + 1}"
-                old_ch = self.neck.pedals[p_id]
-                new_label = new_id
-                if "A" in old_ch.label or p_id == "P1":
-                    new_label = "Pedal 2 (A)"
-                elif "B" in old_ch.label or p_id == "P2":
-                    new_label = "Pedal 3 (B)"
-                elif "C" in old_ch.label or p_id == "P3":
-                    new_label = "Pedal 4 (C)"
-                new_pedals[new_id] = CopedantChange(id=new_id, label=new_label, changes=dict(old_ch.changes))
-            else:
-                new_pedals[p_id] = self.neck.pedals[p_id]
-
-        self.neck.pedals = new_pedals
-        self._rebuild_matrix_table()
+        self._set_franklin_p1(True, franklin_changes={5: -1, 6: -2} if is_e9 else {})
 
     def _append_standard_pedal(self, p_id: str):
         label = p_id
@@ -1073,35 +1038,72 @@ class CopedantEditorDialog(QDialog):
         del self.neck.pedals[pedal_keys[-1]]
         self._rebuild_matrix_table()
 
+
+    # -------------------------------------------------------------------------
+    # Working copies, persistence and apply (D-22)
+    # -------------------------------------------------------------------------
+    def _sync_ui_to_neck(self):
+        """Flushes every tab's widgets into the working copy of the current neck."""
+        self._save_splits_from_ui()
+        self._save_half_stops_from_ui()
+        self.neck.name = self.edit_name.text().strip() or self.neck.name
+        self.neck.neck_type = NeckType(self.combo_neck_type.currentText())
+        self.neck.author = self.edit_author.text()
+        self.neck.description = self.edit_desc.toPlainText()
+        self.neck.author_bio = self.edit_bio.toPlainText()
+        self.neck.social_media = self.edit_social.text()
+        self._working[self.current_neck_idx] = self.neck
+
+    def _append_neck_and_switch(self, new_neck: Neck):
+        """Adds a neck to the guitar immediately (flagged via guitar_changed) and edits it."""
+        self.guitar.necks.append(new_neck)
+        self.guitar_changed = True
+        new_idx = len(self.guitar.necks) - 1
+        self._working[new_idx] = deepcopy(new_neck)
+
+        self.combo_copedant.blockSignals(True)
+        self.combo_copedant.addItem(f"{new_neck.name} ({new_neck.string_count} Str)", new_idx)
+        self.combo_copedant.setCurrentIndex(new_idx)
+        self.combo_copedant.blockSignals(False)
+
+        self.current_neck_idx = new_idx
+        self.neck = self._working[new_idx]
+        self.setWindowTitle(f"Copedant Setup & Tuning Editor - {self.neck.name}")
+        self._load_neck_data()
+
+    def _confirm_profile_overwrite(self, safe_name: str) -> bool:
+        if not ProfileManager.profile_exists(safe_name):
+            return True
+        reply = QMessageBox.question(
+            self, "Overwrite Profile", f"Profile '{safe_name}' already exists. Overwrite it?",
+            QMessageBox.Yes | QMessageBox.No,
+        )
+        return reply == QMessageBox.Yes
+
     def _duplicate_copedant(self):
         if not self.guitar:
             return
-        self._save_splits_from_ui()
-        self._save_half_stops_from_ui()
+        self._sync_ui_to_neck()
 
-        copy_neck = deepcopy(self.neck)
         base_name = self.neck.name.replace(" (Copy)", "")
-        existing_names = [n.name for n in self.guitar.necks]
+        existing_names = {n.name for n in self.guitar.necks} | set(ProfileManager.list_user_profiles())
         counter = 1
         new_name = f"{base_name} (Copy)"
-        while new_name in existing_names:
+        while new_name in existing_names or ProfileManager.sanitize_name(new_name) in existing_names:
             counter += 1
             new_name = f"{base_name} (Copy {counter})"
 
+        copy_neck = deepcopy(self.neck)
         copy_neck.name = new_name
-        self.guitar.necks.append(copy_neck)
-        self.current_neck_idx = len(self.guitar.necks) - 1
-        self.neck = copy_neck
+        copy_neck.source_profile = ProfileManager.sanitize_name(new_name)
+        try:
+            ProfileManager.save_user_profile(copy_neck.source_profile, copy_neck)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "Duplicate Failed", f"Could not save the duplicate profile:\n{e}")
+            return
 
-        ProfileManager.save_user_profile(copy_neck.name, copy_neck)
+        self._append_neck_and_switch(copy_neck)
         self._persist_active_guitar()
-
-        self.combo_copedant.blockSignals(True)
-        self.combo_copedant.addItem(f"{copy_neck.name} ({copy_neck.string_count} Str)", self.current_neck_idx)
-        self.combo_copedant.setCurrentIndex(self.current_neck_idx)
-        self.combo_copedant.blockSignals(False)
-        self._load_neck_data()
-
         QMessageBox.information(self, "Copedant Duplicated", f"Duplicated and saved '{new_name}' to user profiles.")
 
     def _save_explicit_profile(self):
@@ -1109,28 +1111,45 @@ class CopedantEditorDialog(QDialog):
             self,
             "Save Copedant Profile",
             "Enter profile name:",
-            text=self.edit_name.text().strip() or self.neck.name,
+            text=self.neck.source_profile or self.edit_name.text().strip() or self.neck.name,
         )
-        if ok and name.strip():
-            self._save_splits_from_ui()
-            self._save_half_stops_from_ui()
+        if not ok:
+            return
+        safe_name = ProfileManager.sanitize_name(name)
+        if not safe_name:
+            QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
+            return
+        if not self._confirm_profile_overwrite(safe_name):
+            return
 
-            profile_name = name.strip()
-            self.neck.name = profile_name
-            self.edit_name.setText(profile_name)
-            ProfileManager.save_user_profile(profile_name, self.neck)
-            if self.guitar and 0 <= self.current_neck_idx < len(self.guitar.necks):
-                self.guitar.necks[self.current_neck_idx] = self.neck
-            self._persist_active_guitar()
-            QMessageBox.information(self, "Profile Saved", f"Successfully saved '{profile_name}' to disk.")
+        self._sync_ui_to_neck()
+
+        if self.neck.source_profile == safe_name:
+            # This neck is already linked to the profile: save it in place.
+            ProfileManager.save_user_profile(safe_name, self.neck)
+        else:
+            # Save a linked copy as a new neck entry; the original (e.g. a factory preset) is untouched (D-02).
+            profile_neck = deepcopy(self.neck)
+            profile_neck.name = safe_name
+            profile_neck.source_profile = safe_name
+            ProfileManager.save_user_profile(safe_name, profile_neck)
+            if self.guitar:
+                self._append_neck_and_switch(profile_neck)
+                self._persist_active_guitar()
+        QMessageBox.information(self, "Profile Saved", f"Successfully saved '{safe_name}' to disk.")
 
     def _on_switch_copedant(self, idx: int):
         if self.guitar and 0 <= idx < len(self.guitar.necks):
-            self._save_splits_from_ui()
-            self._save_half_stops_from_ui()
+            # Keep unapplied edits of the neck we are leaving (D-22).
+            self._sync_ui_to_neck()
             self.current_neck_idx = idx
-            self.neck = deepcopy(self.guitar.necks[idx])
-            self._migrate_legacy_levers()
+            if idx in self._working:
+                self.neck = self._working[idx]
+            else:
+                self.neck = deepcopy(self.guitar.necks[idx])
+                self._migrate_legacy_levers()
+                self._working[idx] = self.neck
+            self.setWindowTitle(f"Copedant Setup & Tuning Editor - {self.neck.name}")
             self._load_neck_data()
 
     def _persist_active_guitar(self):
@@ -1142,27 +1161,29 @@ class CopedantEditorDialog(QDialog):
                 active_path = storage_dir / "active_guitar_setup.json"
                 self.guitar.save_to_file(str(active_path))
             except Exception:
-                pass
+                log.exception("Failed to persist active guitar setup")
 
     def _apply_and_close(self):
-        self._save_splits_from_ui()
-        self._save_half_stops_from_ui()
+        self._sync_ui_to_neck()
 
-        self.neck.name = self.edit_name.text().strip() or self.neck.name
-        self.neck.neck_type = NeckType(self.combo_neck_type.currentText())
-        self.neck.author = self.edit_author.text()
-        self.neck.description = self.edit_desc.toPlainText()
-        self.neck.author_bio = self.edit_bio.toPlainText()
-        self.neck.social_media = self.edit_social.text()
-
-        if self.guitar and 0 <= self.current_neck_idx < len(self.guitar.necks):
-            self.guitar.necks[self.current_neck_idx] = self.neck
+        if self.guitar:
+            # Apply every neck edited in this session, not just the visible one.
+            for idx, working_neck in self._working.items():
+                if 0 <= idx < len(self.guitar.necks):
+                    self.guitar.necks[idx] = working_neck
         else:
             self.original_neck.__dict__.update(self.neck.__dict__)
 
-        ProfileManager.save_user_profile(self.neck.name, self.neck)
+        # Only profile-linked necks are written back to a profile file; factory/imported necks
+        # persist through active_guitar_setup.json (D-22).
+        applied = self._working.values() if self.guitar else [self.neck]
+        for working_neck in applied:
+            if working_neck.source_profile:
+                try:
+                    ProfileManager.save_user_profile(working_neck.source_profile, working_neck)
+                except (OSError, ValueError) as e:
+                    QMessageBox.warning(self, "Profile Save Failed", f"Could not update profile:\n{e}")
         self._persist_active_guitar()
 
         self.neck_updated.emit()
-        self.accept()
         self.accept()

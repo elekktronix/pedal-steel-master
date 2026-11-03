@@ -1,6 +1,6 @@
 """Stock presets for standard Emmons E9, C6, and PSG Compass factory setups."""
 
-from core.models import CopedantChange, Neck, NeckType, SplitRule, SteelGuitar, StringPitch
+from core.models import CopedantChange, HalfStopRule, Neck, NeckType, SplitRule, SteelGuitar, StringPitch
 
 
 # =========================================================================
@@ -296,14 +296,23 @@ def build_gfi_12u_7p_5kl() -> Neck:
 def build_gfi_12u_7p_5kl_3hs() -> Neck:
     base = build_gfi_12u_7p_5kl()
     hs_splits = list(base.splits)
+    # Half-stop engagement is the token "<ID>_HALF" (see docs/architecture/02-pitch-resolution.md).
     hs_splits.extend([
-        SplitRule(4, ["LKL", "P3HS"], 1, is_active=True, description="LKL + P3HS split"),
-        SplitRule(4, ["LKR", "P3HS"], 0, is_active=True, description="LKR + P3HS cancel"),
-        SplitRule(5, ["VL", "P1HS"], 0, is_active=True, description="VL + P1HS cancel"),
-        SplitRule(5, ["VL", "P3HS"], 0, is_active=True, description="VL + P3HS cancel"),
-        SplitRule(5, ["VL", "P7HS"], 0, is_active=True, description="VL + P7HS cancel"),
-        SplitRule(9, ["RKR", "P1HS"], 3, is_active=True, description="RKR + P1HS compound raise"),
+        SplitRule(4, ["LKL", "P3_HALF"], 1, is_active=True, description="LKL + P3 half-stop split"),
+        SplitRule(4, ["LKR", "P3_HALF"], 0, is_active=True, description="LKR + P3 half-stop cancel"),
+        SplitRule(5, ["VL", "P1_HALF"], 0, is_active=True, description="VL + P1 half-stop cancel"),
+        SplitRule(5, ["VL", "P3_HALF"], 0, is_active=True, description="VL + P3 half-stop cancel"),
+        SplitRule(5, ["VL", "P7_HALF"], 0, is_active=True, description="VL + P7 half-stop cancel"),
+        SplitRule(9, ["RKR", "P1_HALF"], 3, is_active=True, description="RKR + P1 half-stop compound raise"),
     ])
+    half_stops = [
+        HalfStopRule("P1", 5, 1, description="P1 half-stop: B -> C"),
+        HalfStopRule("P1", 9, 1, description="P1 half-stop: B -> C"),
+        HalfStopRule("P3", 4, 1, description="P3 half-stop: E -> F"),
+        HalfStopRule("P3", 5, 1, description="P3 half-stop: B -> C"),
+        HalfStopRule("P7", 5, 1, description="P7 half-stop: B -> C"),
+        HalfStopRule("P7", 6, 1, description="P7 half-stop: G# -> A"),
+    ]
 
     return Neck(
         name="GFI 12U 7P-5KL-3HS",
@@ -313,6 +322,7 @@ def build_gfi_12u_7p_5kl_3hs() -> Neck:
         pedals=base.pedals,
         knee_levers=base.knee_levers,
         splits=hs_splits,
+        half_stops=half_stops,
         description="12 String Universal setup with 7 Pedals, 5 Knee Levers, and 3 Half-Stops in P1, P3, P7.",
         author="PSG Compass",
     )

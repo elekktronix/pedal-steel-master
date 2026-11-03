@@ -26,7 +26,7 @@ from PySide6.QtWidgets import (
 
 from core.ergonomics import StanceDifficulty
 from core.models import Neck
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP
+from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, to_root_name
 from core.voicing_solver import NeighborVoicing, VoicingMatch, VoicingSolver
 
 GRIP_DESCRIPTIONS = {
@@ -344,8 +344,9 @@ class VoicingFinderWidget(QWidget):
     def set_target(self, root: str, chord_type: str):
         self.root_combo.blockSignals(True)
         self.chord_combo.blockSignals(True)
-        if root in NOTE_NAMES_SHARP:
-            self.root_combo.setCurrentText(root)
+        sharp_root = to_root_name(root)  # accepts flats like "Bb" (D-05)
+        if sharp_root:
+            self.root_combo.setCurrentText(sharp_root)
         if chord_type in CHORD_FORMULAS:
             self.chord_combo.setCurrentText(chord_type)
         self.root_combo.blockSignals(False)

@@ -5,6 +5,7 @@ import random
 import time
 from typing import List, Optional, Set, Tuple
 
+from core.models import Neck
 from core.star_map_engine import StarMapEngine, StarMapLandmark
 from core.theory import NOTE_NAMES_SHARP
 
@@ -32,10 +33,15 @@ class FlashcardEngine:
     MAJOR_ROOT_POOL = ["C", "F", "G", "D", "A", "E", "Bb", "Eb", "Ab"]
 
     @classmethod
-    def generate_prompt(cls, time_limit: int = 30, preferred_root: Optional[str] = None) -> FlashcardPrompt:
-        """Generates a random or targeted landmark challenge across 0-24 frets."""
+    def generate_prompt(
+        cls,
+        time_limit: int = 30,
+        preferred_root: Optional[str] = None,
+        neck: Optional[Neck] = None,
+    ) -> FlashcardPrompt:
+        """Generates a random or targeted landmark challenge across 0-24 frets for the neck (D-23)."""
         root = preferred_root if preferred_root else random.choice(cls.MAJOR_ROOT_POOL)
-        landmarks = StarMapEngine.calculate_major_star_map(root)
+        landmarks = StarMapEngine.calculate_major_star_map(root, neck)
         return FlashcardPrompt(
             root_name=root,
             chord_type="Major",

@@ -158,7 +158,7 @@ class FlashcardDrillDialog(QDialog):
         self.elapsed_sec = 0.0
         self.user_clicks.clear()
 
-        self.current_prompt = FlashcardEngine.generate_prompt(time_limit=self.time_limit)
+        self.current_prompt = FlashcardEngine.generate_prompt(time_limit=self.time_limit, neck=self.neck)
         self.lbl_chord_target.setText(f"{self.current_prompt.root_name} Major")
         self.lbl_timer.setText(f"Time Remaining: {self.time_limit:.1f}s")
         self.progress_bar.setRange(0, self.time_limit * 10)

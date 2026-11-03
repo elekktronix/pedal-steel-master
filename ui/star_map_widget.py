@@ -24,8 +24,9 @@ from core.theory import NOTE_NAMES_SHARP
 class StarMapWidget(QDialog):
     landmark_selected = Signal(int, set, set)  # fret, controllers, target_strings
 
-    def __init__(self, parent=None):
+    def __init__(self, neck=None, parent=None):
         super().__init__(parent)
+        self.neck = neck
         self.setWindowTitle("Jeff Newman Star Map & Strings of Pearls Explorer")
         self.resize(880, 520)
 
@@ -91,7 +92,7 @@ class StarMapWidget(QDialog):
         self._refresh_star_map()
 
     def _refresh_star_map(self):
-        landmarks = StarMapEngine.calculate_major_star_map(self.current_root)
+        landmarks = StarMapEngine.calculate_major_star_map(self.current_root, self.neck)
 
         # Rebuild visual chain buttons
         while self.chain_layout.count() > 0:
@@ -134,7 +135,7 @@ class StarMapWidget(QDialog):
             self.table.setItem(idx, 4, QTableWidgetItem(lm.description))
 
     def _select_pocket(self, pocket_num: int):
-        landmarks = StarMapEngine.calculate_major_star_map(self.current_root)
+        landmarks = StarMapEngine.calculate_major_star_map(self.current_root, self.neck)
         if not landmarks:
             return
 
@@ -145,10 +146,10 @@ class StarMapWidget(QDialog):
         else:
             lm = next((l for l in landmarks if "Open" in l.label), landmarks[0])
 
-        self.landmark_selected.emit(lm.fret, lm.controllers, {5, 8})
+        self.landmark_selected.emit(lm.fret, set(lm.controllers), set(lm.target_strings))
 
     def _on_table_double_clicked(self, row: int, col: int):
-        landmarks = StarMapEngine.calculate_major_star_map(self.current_root)
+        landmarks = StarMapEngine.calculate_major_star_map(self.current_root, self.neck)
         if 0 <= row < len(landmarks):
             lm = landmarks[row]
             self.landmark_selected.emit(lm.fret, lm.controllers, lm.target_strings)

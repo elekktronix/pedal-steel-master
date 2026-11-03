@@ -265,14 +265,14 @@ class VoicingSolver:
         if origin_root not in NOTE_TO_SEMITONE:
             return []
 
-        try:
-            c_idx = CIRCLE_KEYS_CLOCKWISE.index(origin_root)
-        except ValueError:
-            c_idx = 0
+        # Locate the key by pitch class so enharmonic spellings (C#, D#, G#, A#, Gb) work (D-18).
+        origin_pc = NOTE_TO_SEMITONE[origin_root]
+        c_idx = next(i for i, k in enumerate(CIRCLE_KEYS_CLOCKWISE) if NOTE_TO_SEMITONE[k] == origin_pc)
+        circle_key = CIRCLE_KEYS_CLOCKWISE[c_idx]
 
         v_root = CIRCLE_KEYS_CLOCKWISE[(c_idx + 1) % 12]
         iv_root = CIRCLE_KEYS_CLOCKWISE[(c_idx - 1) % 12]
-        vi_root = RELATIVE_MINORS.get(origin_root, "")
+        vi_root = RELATIVE_MINORS.get(circle_key, "")
         ii_root = CIRCLE_KEYS_CLOCKWISE[(c_idx + 2) % 12]
 
         targets = [
@@ -412,30 +412,6 @@ class VoicingSolver:
             ("Fmaj9", {1, 2, 3, 4, 5, 6, 7, 8, 9, 10}, "Full 10-string open spread"),
             ("F6/9", {1, 3, 4, 5, 7, 8, 9, 10}, "Open swing comping voicing"),
         ]
-
-    @classmethod
-    def get_c6_diminished_matrix_matches(cls, fret: int) -> List[VoicingMatch]:
-        """Resolves the 4 symmetrical diminished chords and G#7b9 produced simultaneously
-        when Pedal 5 and Pedal 6 are engaged together on the C6 neck.
-        """
-        ergo = ErgonomicStance(is_possible=True, difficulty=StanceDifficulty.MODERATE, penalty=0.0)
-        dim_roots = ["A", "C", "Eb", "F#"]
-        matches = []
-        for r in dim_roots:
-            matches.append(
-                VoicingMatch(
-                    fret=fret,
-                    engaged_levers=["P5", "P6"],
-                    grip_strings=[4, 5, 6, 7],
-                    grip_key="7-6-5-4",
-                    bass_note="C",
-                    bass_interval="R",
-                    voicing_formula="bb7 - b5 - b3 - 1",
-                    score=92.0,
-                    ergonomics=ergo,
-                )
-            )
-        return matches
 
 
 def get_newman_minor_anchors(minor_root: str) -> List[Tuple[str, int, Set[str], List[int], str]]:

@@ -32,17 +32,17 @@ FRANKLIN_24_PERMUTATIONS: Dict[int, Tuple[str, str, Tuple[str, str, str, str]]] 
     15: ("T - M - I - M", "Double-Middle Roll",      ("T", "M", "I", "M")),
     16: ("I - T - M - T", "Stride Interlock",        ("I", "T", "M", "T")),
     17: ("M - I - T - I", "Double-Index Bounce",     ("M", "I", "T", "I")),
-    18: ("M - T - I - M", "Outside Cycle",           ("M", "T", "I", "M")),
+    18: ("T - T - M - I", "Thumb Double-Tap Reverse", ("T", "T", "M", "I")),
     19: ("T - I - M - M", "Inside Double-Middle",    ("T", "I", "M", "M")),
-    20: ("T - M - I - T", "Reverse Cross Jump",      ("T", "M", "I", "T")),
-    21: ("T - I - M - T", "Forward Cycle Anchor",    ("T", "I", "M", "T")),
+    20: ("T - I - T - M", "Thumb Pivot Climb",       ("T", "I", "T", "M")),
+    21: ("I - T - I - M", "Index Pivot Climb",       ("I", "T", "I", "M")),
     22: ("I - M - I - T", "Index Alternate Bounce",  ("I", "M", "I", "T")),
-    23: ("M - I - T - M", "Rapid Middle Return",     ("M", "I", "T", "M")),
+    23: ("M - I - T - T", "Backward Roll Thumb Finish", ("M", "I", "T", "T")),
     24: ("I - T - T - M", "Inside Thumb Split",      ("I", "T", "T", "M")),
 }
 
 # Standard string assignment mapping for a 4-string group (e.g., 4, 5, 6, 8)
-# Low string to high string: Thumb handles lowest two, Index middle, Middle top[cite: 16]
+# Low string to high string: Thumb handles lowest two, Index middle, Middle top
 FINGER_TO_STRING_OFFSET: Dict[str, int] = {
     "T": 0,  # Lower bass strings
     "I": 2,  # Middle string
@@ -65,16 +65,21 @@ class PermutationEngine:
         cycles: int = 4,
     ) -> List[PickEvent]:
         """Generates sequential picking events assigning fingers to physical strings."""
-        if len(target_strings) < 4:
-            # Fallback if grip has fewer than 4 strings
-            sorted_strs = sorted(target_strings)
-            while len(sorted_strs) < 4:
-                sorted_strs.append(sorted_strs[-1])
+        # String numbers grow toward the bass, so sort descending: index 0 = lowest pitch (D-13).
+        bass_first = sorted(set(target_strings), reverse=True)
+        if not bass_first:
+            return []
+        if len(bass_first) >= 4:
+            sorted_strs = bass_first[:4]
+        elif len(bass_first) == 3:
+            sorted_strs = [bass_first[0], bass_first[0], bass_first[1], bass_first[2]]  # thumb stays on bass
+        elif len(bass_first) == 2:
+            sorted_strs = [bass_first[0], bass_first[0], bass_first[1], bass_first[1]]
         else:
-            sorted_strs = sorted(target_strings)[:4]
+            sorted_strs = bass_first * 4
 
-        # sorted_strs[0] is lowest string (highest number e.g. 8)
-        # sorted_strs[3] is highest string (lowest number e.g. 4)
+        # sorted_strs[0] is the lowest-pitched string (highest number, e.g. 8): thumb
+        # sorted_strs[3] is the highest-pitched string (lowest number, e.g. 4): middle finger
         _, _, pattern = cls.get_permutation_info(perm_id)
 
         events: List[PickEvent] = []

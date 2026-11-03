@@ -5,6 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from core.models import Neck
 from core.resolver import FretboardResolver
+from core.stances import detect_roles, is_c6_neck, resolve_stance
 from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, SCALE_FORMULAS, get_pitch_class
 
 
@@ -34,28 +35,29 @@ class ScaleBox:
 
 
 class ScaleSolver:
+    # Role tokens (core.stances); mapped to the neck's controller IDs at runtime (D-23).
     ALLOWED_COMBOS_E9 = [
-        set(),
-        {"P1"},
-        {"P2"},
-        {"P1", "P2"},
-        {"LKL"},
-        {"LKR"},
-        {"P1", "LKL"},
-        {"P2", "RKL"},
+        (),
+        ("A",),
+        ("B",),
+        ("A", "B"),
+        ("F",),
+        ("D",),
+        ("A", "F"),
+        ("B", "RKL"),
     ]
 
     ALLOWED_COMBOS_C6 = [
-        set(),
-        {"P4"},
-        {"P5"},
-        {"P6"},
-        {"P7"},
-        {"P8"},
-        {"P4", "P5"},
-        {"P5", "P6"},
-        {"RKL"},
-        {"RKR"},
+        (),
+        ("C6P4",),
+        ("C6P5",),
+        ("C6P6",),
+        ("C6P7",),
+        ("C6P8",),
+        ("C6P4", "C6P5"),
+        ("C6P5", "C6P6"),
+        ("RKL",),
+        ("RKR",),
     ]
 
     @classmethod
@@ -73,9 +75,31 @@ class ScaleSolver:
 
         scale_formula = SCALE_FORMULAS[scale_name]
         root_pc = NOTE_TO_SEMITONE[root_name]
-        combos = cls.ALLOWED_COMBOS_C6 if "C6" in neck.name else cls.ALLOWED_COMBOS_E9
-        available_controllers = set(neck.pedals.keys()) | set(neck.knee_levers.keys())
-        valid_combos = [c for c in combos if c.issubset(available_controllers)]
+        combos = cls.ALLOWED_COMBOS_C6 if is_c6_neck(neck) else cls.ALLOWED_COMBOS_E9
+        roles = detect_roles(neck)
+        valid_combos: List[Set[str]] = []
+        for tokens in combos:
+            stance = resolve_stance(neck, tokens, roles)
+            if stance is not None and stance not in valid_combos:
+                valid_combos.append(stance)
+
+        # Resolve each (fret, combo) once; the per-string loop below only looks results up (D-31).
+        state_cache: Dict[Tuple[int, frozenset], Dict[int, object]] = {}
+
+        def _states(fret: int, levers: Set[str]) -> Dict[int, object]:
+            key = (fret, frozenset(levers))
+            if key not in state_cache:
+                state_cache[key] = {
+                    st.string_number: st
+                    for st in FretboardResolver.resolve_neck_state(
+                        neck=neck,
+                        fret=fret,
+                        engaged_levers=levers,
+                        target_root_name=root_name,
+                        target_scale_name=scale_name,
+                    )
+                }
+            return state_cache[key]
 
         candidate_boxes: List[ScaleBox] = []
 
@@ -95,14 +119,7 @@ class ScaleSolver:
 
                 for fret in range(f_start, f_end + 1):
                     for levers in valid_combos:
-                        states = FretboardResolver.resolve_neck_state(
-                            neck=neck,
-                            fret=fret,
-                            engaged_levers=levers,
-                            target_root_name=root_name,
-                            target_scale_name=scale_name,
-                        )
-                        s_state = next((st for st in states if st.string_number == s_num), None)
+                        s_state = _states(fret, levers).get(s_num)
                         if not s_state:
                             continue
 

@@ -125,6 +125,7 @@ class StringsOfPearlsDialog(QDialog):
         self.steps = PearlsEngine.generate_scale_run(
             key_root=self.current_key,
             track_name=self.current_track,
+            neck=self.neck,
         )
 
         self.table.setRowCount(len(self.steps))

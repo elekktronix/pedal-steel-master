@@ -239,9 +239,9 @@ class RelativeMovesWidget(QWidget):
                 item.widget().deleteLater()
 
         if self.is_c6:
-            moves = RelativeMovesEngine.get_c6_relative_movements(self.current_fret)
+            moves = RelativeMovesEngine.get_c6_relative_movements(self.current_fret, self.neck)
         else:
-            moves = RelativeMovesEngine.get_e9_relative_movements(self.current_fret, self.active_levers)
+            moves = RelativeMovesEngine.get_e9_relative_movements(self.current_fret, self.active_levers, self.neck)
 
         for m in moves:
             btn = QPushButton(f"{m.label} ➔ {m.chord_name}")
@@ -282,19 +282,22 @@ class RelativeMovesWidget(QWidget):
 
         self.moves_pills_layout.addStretch()
 
+    @staticmethod
+    def _chord_of(opt: RelativeMoveOption):
+        """Root and CHORD_FORMULAS type carried by the option itself (never parsed from display text, D-28)."""
+        from core.theory import CHORD_FORMULAS
+
+        chord_type = opt.chord_type if opt.chord_type in CHORD_FORMULAS else "Major"
+        return opt.chord_root, chord_type
+
     def _emit_hub_move(self, opt: RelativeMoveOption):
         self.active_pill_label = opt.label
         self._refresh_hub_ribbon()
-        # Parse root and quality for synchronized canvas interval analysis
-        from core.relative_moves import _safe_extract_root_and_quality
-        root, quality = _safe_extract_root_and_quality(opt.chord_name)
-        chord_type = "Dominant 7th" if "7" in quality else ("Minor" if "m" in quality else "Major")
+        root, chord_type = self._chord_of(opt)
         self.move_applied.emit(opt.target_fret, set(opt.controllers), set(opt.target_strings), root, chord_type)
 
     def _emit_relative_move(self, opt: RelativeMoveOption):
         self.active_pill_label = f"{opt.label} ➔ {opt.chord_name}"
         self._refresh_moves_ribbon()
-        from core.relative_moves import _safe_extract_root_and_quality
-        root, quality = _safe_extract_root_and_quality(opt.chord_name)
-        chord_type = "Dominant 7th" if "7" in quality else ("Minor" if "m" in quality else "Major")
+        root, chord_type = self._chord_of(opt)
         self.move_applied.emit(opt.target_fret, set(opt.controllers), set(opt.target_strings), root, chord_type)

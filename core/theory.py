@@ -48,6 +48,8 @@ CHORD_FORMULAS: Dict[str, Dict[int, str]] = {
     "Diminished 7th": {0: "R", 3: "b3", 6: "b5", 9: "bb7"},
     "Augmented": {0: "R", 4: "3", 8: "#5"},
     "Sus4": {0: "R", 5: "4", 7: "5"},
+    "Half-Diminished": {0: "R", 3: "b3", 6: "b5", 10: "b7"},
+    "6/9": {0: "R", 2: "9", 4: "3", 7: "5", 9: "6"},
 }
 
 # Standard scale formulas mapping semitone offset -> scale degree label
@@ -81,21 +83,6 @@ NASHVILLE_SCALE_DEGREES: Dict[int, str] = {
     11: "7",
 }
 
-NASHVILLE_SCALE_DEGREES: Dict[int, str] = {
-    0: "1",
-    1: "b2",
-    2: "2",
-    3: "b3",
-    4: "3",
-    5: "4",
-    6: "b5",
-    7: "5",
-    8: "b6",
-    9: "6",
-    10: "b7",
-    11: "7",
-}
-
 
 def extract_root_and_quality(chord_label: str) -> Tuple[str, str]:
     """Safely extracts the root note (e.g., 'C#', 'Bb', 'E') and remaining quality string."""
@@ -111,9 +98,43 @@ def extract_root_and_quality(chord_label: str) -> Tuple[str, str]:
     return ("", "")
 
 
-def get_nashville_chord_symbol(chord_label: str, key_root: str) -> str:
-    """Calculates the Nashville Number symbol (e.g., '1', '2-', '4', '5', '5⁷', '6-')
-    for any chord label relative to the parent key center.
+# Chord family (CHORD_FORMULAS key / ChordIdentifier family) -> Nashville quality suffix
+_NASHVILLE_FAMILY_SUFFIX: Dict[str, str] = {
+    "Major": "", "Major 7th": "", "Major 6th": "", "Major 6": "", "6/9": "", "Dyad": "",
+    "Minor": "-", "Minor 7th": "-", "Minor 6th": "-", "Minor 6": "-",
+    "Dominant 7th": "⁷", "Dominant 9th": "⁷",
+    "Diminished": "°", "Diminished 7th": "°",
+    "Half-Diminished": "ø",
+    "Augmented": "+",
+    "Sus4": "sus",
+}
+
+
+def _quality_suffix_from_text(quality: str) -> str:
+    """Parses a chord quality string ('m7', 'Maj • Group 2', 'Dominant 7th', 'dim7', ...)."""
+    q = quality.split("•")[0].split("[")[0].strip().lower()
+    if q.startswith(("maj", "major", "Δ")):
+        return ""
+    if q.startswith(("m7b5", "half", "ø")):
+        return "ø"
+    if q.startswith(("dim", "°")):
+        return "°"
+    if q.startswith(("aug", "+")):
+        return "+"
+    if q.startswith("sus"):
+        return "sus"
+    if q.startswith(("min", "m", "-")):
+        return "-"
+    if q.startswith(("dom", "7", "9", "11", "13")):
+        return "⁷"
+    return ""
+
+
+def get_nashville_chord_symbol(chord_label: str, key_root: str, family: Optional[str] = None) -> str:
+    """Nashville Number symbol (e.g. '1', '2-', '5⁷', '7°') for a chord relative to a key.
+
+    Pass `family` (a CHORD_FORMULAS key or ChordIdentifier family) when known; otherwise the
+    quality is parsed from the label text after the root.
     """
     if not chord_label or not key_root or key_root not in NOTE_TO_SEMITONE:
         return ""
@@ -125,23 +146,25 @@ def get_nashville_chord_symbol(chord_label: str, key_root: str) -> str:
     semitone_delta = (NOTE_TO_SEMITONE[root] - NOTE_TO_SEMITONE[key_root]) % 12
     base_degree = NASHVILLE_SCALE_DEGREES.get(semitone_delta, str(semitone_delta + 1))
 
-    q_lower = quality.lower()
-    is_major = "maj" in q_lower or "major" in q_lower
-    is_dim = "dim" in q_lower or "°" in q_lower
-    is_half_dim = "m7b5" in q_lower or "ø" in q_lower
-    is_dom7 = ("7" in q_lower or "dom" in q_lower or "9" in q_lower) and not is_major and "m" not in q_lower
-    is_minor = ("min" in q_lower or "m" in q_lower or "-" in q_lower) and not is_major and not is_dom7 and not is_dim
-
-    if is_dim:
-        return f"{base_degree}°"
-    elif is_half_dim:
-        return f"{base_degree}ø"
-    elif is_minor:
-        return f"{base_degree}-"
-    elif is_dom7:
-        return f"{base_degree}⁷"
+    if family is not None and family in _NASHVILLE_FAMILY_SUFFIX:
+        suffix = _NASHVILLE_FAMILY_SUFFIX[family]
     else:
-        return base_degree
+        suffix = _quality_suffix_from_text(quality)
+    return f"{base_degree}{suffix}"
+
+
+def to_root_name(name: Optional[str], spellings: List[str] = NOTE_NAMES_SHARP) -> Optional[str]:
+    """Respells any enharmonic root ('Db', 'C#', 'B#') into the given spelling list, or None."""
+    if not name:
+        return None
+    pc = NOTE_TO_SEMITONE.get(name.strip()[:1].upper() + name.strip()[1:])
+    if pc is None:
+        return None
+    for candidate in spellings:
+        if NOTE_TO_SEMITONE.get(candidate) == pc:
+            return candidate
+    return None
+
 
 def note_to_midi(name: str, octave: int) -> int:
     clean_name = name.strip().capitalize()
