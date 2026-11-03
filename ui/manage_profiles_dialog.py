@@ -17,6 +17,7 @@ from PySide6.QtWidgets import (
 
 from core.models import Neck
 from core.profile_manager import ProfileManager
+from ui.profile_prompts import choose_profile_name
 
 
 class ProfileManagerDialog(QDialog):
@@ -93,13 +94,9 @@ class ProfileManagerDialog(QDialog):
         if not safe_name:
             QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
             return
-        if ProfileManager.profile_exists(safe_name):
-            reply = QMessageBox.question(
-                self, "Overwrite Profile", f"Profile '{safe_name}' already exists. Overwrite it?",
-                QMessageBox.Yes | QMessageBox.No,
-            )
-            if reply != QMessageBox.Yes:
-                return
+        safe_name = choose_profile_name(self, safe_name)
+        if safe_name is None:
+            return
 
         # Save a linked copy; the active neck itself is not modified.
         profile_neck = deepcopy(self.current_neck)

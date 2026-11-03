@@ -221,11 +221,13 @@ class FakeAudio:
 class MainWindowTests(unittest.TestCase):
     def setUp(self):
         from core.profile_manager import ProfileManager
+        import core.session as session
         import core.settings as settings
 
         self._tmp = tempfile.TemporaryDirectory()
         tmp = Path(self._tmp.name)
         self._patches = [
+            mock.patch.object(session, "SESSION_FILE", tmp / "session.json"),
             mock.patch.object(ProfileManager, "STORAGE_DIR", tmp / "profiles"),
             mock.patch.object(settings, "SETTINGS_FILE", tmp / "app_settings.json"),
             mock.patch.object(settings, "LEGACY_SETTINGS_FILE", tmp / "legacy.json"),

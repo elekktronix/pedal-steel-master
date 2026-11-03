@@ -48,6 +48,7 @@ from core.models import (
     shift_pedal_ids,
 )
 from core.profile_manager import ProfileManager
+from ui.profile_prompts import choose_profile_name
 from core.theory import NOTE_NAMES_SHARP, midi_to_note_name, note_to_midi
 
 log = logging.getLogger(__name__)
@@ -1071,15 +1072,6 @@ class CopedantEditorDialog(QDialog):
         self.setWindowTitle(f"Copedant Setup & Tuning Editor - {self.neck.name}")
         self._load_neck_data()
 
-    def _confirm_profile_overwrite(self, safe_name: str) -> bool:
-        if not ProfileManager.profile_exists(safe_name):
-            return True
-        reply = QMessageBox.question(
-            self, "Overwrite Profile", f"Profile '{safe_name}' already exists. Overwrite it?",
-            QMessageBox.Yes | QMessageBox.No,
-        )
-        return reply == QMessageBox.Yes
-
     def _duplicate_copedant(self):
         if not self.guitar:
             return
@@ -1119,8 +1111,10 @@ class CopedantEditorDialog(QDialog):
         if not safe_name:
             QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
             return
-        if not self._confirm_profile_overwrite(safe_name):
-            return
+        if self.neck.source_profile != safe_name:  # saving over this neck's own profile needs no prompt
+            safe_name = choose_profile_name(self, safe_name)
+            if safe_name is None:
+                return
 
         self._sync_ui_to_neck()
 

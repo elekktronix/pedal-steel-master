@@ -118,6 +118,12 @@ class MainMenuBuilder:
         main_window.temp_group.addAction(main_window.action_newman_tune)
         temp_menu.addAction(main_window.action_newman_tune)
 
+        temp_menu.addSeparator()
+        main_window.action_pedal_swells = QAction("Pedal && Bar Swells (bend ringing notes)", main_window, checkable=True)
+        main_window.action_pedal_swells.setChecked(main_window.settings.get("pedal_swells", True))
+        main_window.action_pedal_swells.toggled.connect(main_window._toggle_pedal_swells)
+        temp_menu.addAction(main_window.action_pedal_swells)
+
         main_window.action_inversions = QAction("Show Chord Inversions Above Bar", main_window, checkable=True)
         main_window.action_inversions.setChecked(main_window.settings.get("show_inversions", True))
         main_window.action_inversions.triggered.connect(main_window._toggle_inversions_preference)

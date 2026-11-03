@@ -21,6 +21,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "show_scale_box": True,
     "show_nashville": True,
     "use_newman_tuning": False,
+    "pedal_swells": True,
 }
 
 

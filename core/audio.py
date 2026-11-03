@@ -1,17 +1,21 @@
 """Low-latency native MIDI audio engine for pedal steel with natural acoustic sustain (Patch 25),
 channel-per-string independent mechanical pitch glides, and Jeff Newman compensated temperament.
 
+All MIDI output runs on one scheduler thread fed by a timed queue (E-11).
+
 Channel map (D-01): strings use channels 0-8 and 10-14 (channel 9 is the General MIDI percussion
 channel and is never used); channel 15 is reserved for sequences and single clicked notes.
 """
 
 import ctypes
+import heapq
+import itertools
 import logging
 import math
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Union
 
 if TYPE_CHECKING:  # pragma: no cover
     from core.models import Neck
@@ -101,81 +105,163 @@ def compute_newman_cents(neck: "Neck", engaged: Iterable[str], strings: Iterable
     return cents
 
 
+BEND_RANGE_SEMITONES = 2.0  # General MIDI default pitch-bend sensitivity
+
+
 def cents_to_bend(cents: float) -> int:
     """Pitch-bend value for a cents offset, assuming the GM default +/-2 semitone bend range."""
-    return int(max(-8192, min(8191, (cents / 200.0) * 8191)))
+    return int(max(-8192, min(8191, (cents / (BEND_RANGE_SEMITONES * 100.0)) * 8191)))
+
+
+class _Scheduler(threading.Thread):
+    """Single worker thread executing timed MIDI actions in order (E-11).
+
+    All MIDI output and all engine state changes happen on this thread, so no per-note threads
+    are created and no state is shared across threads.
+    """
+
+    def __init__(self):
+        super().__init__(name="psg-midi-scheduler", daemon=True)
+        self._cond = threading.Condition()
+        self._queue: List[tuple] = []
+        self._seq = itertools.count()
+        self._running = True
+
+    def schedule(self, delay: float, fn: Callable[[], None]) -> None:
+        with self._cond:
+            heapq.heappush(self._queue, (time.monotonic() + max(0.0, delay), next(self._seq), fn))
+            self._cond.notify()
+
+    def stop(self, timeout: float = 1.0) -> None:
+        with self._cond:
+            self._running = False
+            self._cond.notify()
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout)
+
+    def run(self) -> None:
+        while True:
+            with self._cond:
+                while self._running and not self._queue:
+                    self._cond.wait()
+                if not self._running:
+                    return
+                due, _, fn = self._queue[0]
+                wait = due - time.monotonic()
+                if wait > 0:
+                    self._cond.wait(wait)
+                    continue
+                heapq.heappop(self._queue)
+            try:
+                fn()
+            except Exception:
+                log.exception("MIDI scheduler action failed")
+
+    def drain(self, timeout: float = 2.0) -> None:
+        """Blocks until the queue is empty (used by tests and shutdown)."""
+        end = time.monotonic() + timeout
+        while time.monotonic() < end:
+            with self._cond:
+                if not self._queue:
+                    break
+            time.sleep(0.005)
+        time.sleep(0.01)  # let the last popped action finish
 
 
 class MidiAudioEngine:
-    def __init__(self):
+    """Pedal steel MIDI voice engine.
+
+    `send` lets callers (and tests) inject a function receiving raw short MIDI messages; by
+    default the Windows MIDI mapper (winmm) is used, and on other platforms the engine is silent.
+    """
+
+    GLIDE_STEPS = 16
+
+    def __init__(self, send: Optional[Callable[[int], None]] = None):
         self._opened = False
         self._hmidi = ctypes.c_void_p()
-        self._lock = threading.Lock()          # serializes winmm calls
-        self._state_lock = threading.Lock()    # guards _active_pitches / _current_bends
-        self._active_pitches: Dict[int, int] = {}       # channel -> sounding midi pitch
-        self._current_bends: Dict[int, int] = {}        # channel -> bend (-8192 to 8191)
+        self._send_fn: Optional[Callable[[int], None]] = None
+        # Worker-thread state (only touched on the scheduler thread):
+        self._active_pitches: Dict[int, int] = {}   # channel -> sounding midi pitch
+        self._current_bends: Dict[int, int] = {}    # channel -> bend (-8192 to 8191)
+        self._glide_gen: Dict[int, int] = {}        # channel -> generation; newer strikes/glides cancel older glides
         self.use_compensated_temperament: bool = False
 
-        if sys.platform == "win32" and winmm is not None:
+        if send is not None:
+            self._send_fn = send
+            self._opened = True
+        elif sys.platform == "win32" and winmm is not None:
             try:
                 res = winmm.midiOutOpen(ctypes.byref(self._hmidi), ctypes.c_uint(0xFFFFFFFF), 0, 0, 0)
                 if res != 0:
                     res = winmm.midiOutOpen(ctypes.byref(self._hmidi), 0, 0, 0, 0)
-
                 if res == 0 and self._hmidi.value:
+                    self._send_fn = lambda msg: winmm.midiOutShortMsg(self._hmidi, ctypes.c_uint32(msg))
                     self._opened = True
-                    for ch in ALL_CHANNELS:
-                        # GM Patch 25: Steel String Acoustic Guitar
-                        self._send_short_msg(0x000019C0 | ch)
-                        # CC 64 (Sustain Pedal ON)
-                        self._send_short_msg(0x007F40B0 | ch)
-                        self._set_channel_pitch_bend(ch, 0)
                 else:
                     log.warning("MIDI output could not be opened (midiOutOpen=%s)", res)
             except Exception:
                 log.exception("MIDI initialisation failed")
                 self._opened = False
 
-    def _send_short_msg(self, msg: int):
-        if self._opened and self._hmidi and self._hmidi.value:
-            with self._lock:
-                try:
-                    winmm.midiOutShortMsg(self._hmidi, ctypes.c_uint32(msg))
-                except Exception:
-                    log.debug("midiOutShortMsg failed", exc_info=True)
+        self._scheduler = _Scheduler()
+        self._scheduler.start()
+        if self._opened:
+            self._scheduler.schedule(0, self._init_channels)
 
-    def _set_channel_pitch_bend(self, channel: int, bend_val: int):
-        """Sends 14-bit pitch bend to a channel. bend_val: -8192..8191 (+/-2 semitones). 0 is center."""
+    # ---- worker-thread primitives -------------------------------------------------------------
+    def _send(self, msg: int) -> None:
+        if self._opened and self._send_fn is not None:
+            try:
+                self._send_fn(msg)
+            except Exception:
+                log.debug("MIDI send failed", exc_info=True)
+
+    def _init_channels(self) -> None:
+        for ch in ALL_CHANNELS:
+            self._send(0x000019C0 | ch)  # GM Patch 25: Steel String Acoustic Guitar
+            self._send(0x007F40B0 | ch)  # CC 64 (Sustain Pedal ON)
+            self._bend(ch, 0)
+
+    def _bend(self, channel: int, bend_val: int) -> None:
+        """14-bit pitch bend on a channel. bend_val: -8192..8191 (+/-2 semitones). 0 is center."""
         ch = max(0, min(15, channel))
         val_14bit = max(0, min(16383, int(bend_val + 8192)))
-        lsb = val_14bit & 0x7F
-        msb = (val_14bit >> 7) & 0x7F
-        self._send_short_msg((0xE0 | ch) | (lsb << 8) | (msb << 16))
-        with self._state_lock:
-            self._current_bends[ch] = bend_val
+        self._send((0xE0 | ch) | ((val_14bit & 0x7F) << 8) | (((val_14bit >> 7) & 0x7F) << 16))
+        self._current_bends[ch] = bend_val
 
-    def _strike(self, ch: int, pitch: int, velocity: int, bend: int):
-        """Note-off for the channel's previous note, set bend, note-on."""
-        with self._state_lock:
-            prior = self._active_pitches.get(ch)
+    def _note_off(self, ch: int) -> None:
+        prior = self._active_pitches.pop(ch, None)
         if prior is not None:
-            self._send_short_msg((0x80 | ch) | ((prior & 0x7F) << 8))
-        self._set_channel_pitch_bend(ch, bend)
-        self._send_short_msg((0x90 | ch) | ((int(pitch) & 0x7F) << 8) | ((velocity & 0x7F) << 16))
-        with self._state_lock:
-            self._active_pitches[ch] = int(pitch)
+            self._send((0x80 | ch) | ((prior & 0x7F) << 8))
+
+    def _strike(self, ch: int, pitch: int, velocity: int, bend: int) -> None:
+        """Note-off for the channel's previous note, cancel its glide, set bend, note-on."""
+        self._glide_gen[ch] = self._glide_gen.get(ch, 0) + 1
+        self._note_off(ch)
+        self._bend(ch, bend)
+        self._send((0x90 | ch) | ((int(pitch) & 0x7F) << 8) | ((velocity & 0x7F) << 16))
+        self._active_pitches[ch] = int(pitch)
+
+    # ---- public API (thread-safe: everything is queued) ---------------------------------------
+    @property
+    def is_available(self) -> bool:
+        return self._opened
 
     def silence_all(self):
         if not self._opened:
             return
-        for ch in ALL_CHANNELS:
-            self._send_short_msg(0x000078B0 | ch)  # All Sound Off
-            self._send_short_msg(0x00007BB0 | ch)  # All Notes Off
-            self._send_short_msg(0x007F40B0 | ch)  # Sustain On
-            self._set_channel_pitch_bend(ch, 0)
-        with self._state_lock:
+
+        def _do():
+            for ch in ALL_CHANNELS:
+                self._glide_gen[ch] = self._glide_gen.get(ch, 0) + 1
+                self._send(0x000078B0 | ch)  # All Sound Off
+                self._send(0x00007BB0 | ch)  # All Notes Off
+                self._send(0x007F40B0 | ch)  # Sustain On
+                self._bend(ch, 0)
             self._active_pitches.clear()
-            self._current_bends.clear()
+
+        self._scheduler.schedule(0, _do)
 
     def play_note(
         self,
@@ -189,7 +275,7 @@ class MidiAudioEngine:
             return
         ch = channel_for_string(string_num) if string_num else SEQUENCE_CHANNEL
         bend = cents_to_bend(cents_offset) if self.use_compensated_temperament else 0
-        threading.Thread(target=self._strike, args=(ch, pitch, velocity, bend), daemon=True).start()
+        self._scheduler.schedule(0, lambda: self._strike(ch, pitch, velocity, bend))
 
     def play_pocket(
         self,
@@ -202,92 +288,93 @@ class MidiAudioEngine:
         (A list is still accepted and mapped to strings 1..n by position.)"""
         if not self._opened or not pitches:
             return
-
         if isinstance(pitches, dict):
             pitch_dict = {int(k): int(v) for k, v in pitches.items() if v > 0}
         elif isinstance(pitches, list):
             pitch_dict = {idx + 1: int(p) for idx, p in enumerate(pitches) if p > 0}
         else:
             return
-        if not pitch_dict:
-            return
         cents = cents or {}
         use_cents = self.use_compensated_temperament
 
-        def _worker():
-            # Stagger lowest bass string to highest treble string
-            ordered_strings = sorted(pitch_dict.keys(), reverse=True)
-            for idx, s_num in enumerate(ordered_strings):
-                bend = cents_to_bend(cents.get(s_num, 0.0)) if use_cents else 0
-                self._strike(channel_for_string(s_num), pitch_dict[s_num], velocity, bend)
-                if roll and idx < len(ordered_strings) - 1:
-                    time.sleep(0.045)
-
-        threading.Thread(target=_worker, daemon=True).start()
+        # Stagger lowest bass string to highest treble string when rolling.
+        for idx, s_num in enumerate(sorted(pitch_dict, reverse=True)):
+            ch = channel_for_string(s_num)
+            bend = cents_to_bend(cents.get(s_num, 0.0)) if use_cents else 0
+            pitch = pitch_dict[s_num]
+            self._scheduler.schedule(
+                idx * 0.045 if roll else 0.0,
+                lambda ch=ch, pitch=pitch, bend=bend: self._strike(ch, pitch, velocity, bend),
+            )
 
     def glide_string_pitch(
         self,
         string_num: int,
-        target_midi: int,
         semitone_delta: float,
-        duration_sec: float = 0.080,
-    ):
-        """Smooth mechanical pull glide on an individual string channel without re-striking the note.
-        (Not wired into the UI yet; see docs/architecture/07-enhancements.md E-11.)"""
+        duration_sec: float = 0.12,
+        cents_offset: float = 0.0,
+    ) -> bool:
+        """Bends the note sounding on a string to `semitone_delta` (+ cents) above its struck pitch
+        without re-striking it: a pedal/lever "swell" (E-11). Returns False if the target is outside
+        the +/-2 semitone bend range (callers should re-strike instead). A newer glide or strike on
+        the same string cancels this one."""
         if not self._opened:
-            return
-
+            return False
+        total_cents = semitone_delta * 100.0 + (cents_offset if self.use_compensated_temperament else 0.0)
+        if abs(total_cents) > BEND_RANGE_SEMITONES * 100.0:
+            return False
         ch = channel_for_string(string_num)
-        target_bend = int(max(-8191, min(8191, (semitone_delta / 2.0) * 8191)))
+        target = cents_to_bend(total_cents)
+        steps = self.GLIDE_STEPS
+        step_time = max(0.003, duration_sec / steps)
 
-        def _glide_worker():
-            steps = 16
-            sleep_step = max(0.003, duration_sec / steps)
-            with self._state_lock:
-                start_bend = self._current_bends.get(ch, 0)
-
+        def _start():
+            gen = self._glide_gen.get(ch, 0) + 1
+            self._glide_gen[ch] = gen
+            start = self._current_bends.get(ch, 0)
             for i in range(1, steps + 1):
-                fraction = i / steps
-                curve = 0.5 - 0.5 * math.cos(fraction * math.pi)
-                self._set_channel_pitch_bend(ch, int(start_bend + (target_bend - start_bend) * curve))
-                time.sleep(sleep_step)
+                curve = 0.5 - 0.5 * math.cos((i / steps) * math.pi)  # mechanical ease in/out
+                value = int(start + (target - start) * curve)
+                self._scheduler.schedule(
+                    i * step_time,
+                    lambda value=value: self._bend(ch, value) if self._glide_gen.get(ch) == gen else None,
+                )
 
-            self._set_channel_pitch_bend(ch, target_bend)
-
-        threading.Thread(target=_glide_worker, daemon=True).start()
+        self._scheduler.schedule(0, _start)
+        return True
 
     def play_scale_sequence(self, pitches: List[int], delay: float = 0.38, velocity: int = 95):
         """Plays notes one after another on the sequence channel, releasing each previous note."""
         if not self._opened or not pitches:
             return
-
-        valid_pitches = [int(p) for p in pitches if p > 0]
-        if not valid_pitches:
-            return
-
-        def _worker():
-            ch = SEQUENCE_CHANNEL
-            for p in valid_pitches:
-                self._strike(ch, p, velocity, 0)
-                time.sleep(delay)
-            with self._state_lock:
-                last = self._active_pitches.pop(ch, None)
-            if last is not None:
-                self._send_short_msg((0x80 | ch) | ((last & 0x7F) << 8))
-
-        threading.Thread(target=_worker, daemon=True).start()
+        valid = [int(p) for p in pitches if p > 0]
+        ch = SEQUENCE_CHANNEL
+        for i, p in enumerate(valid):
+            self._scheduler.schedule(i * delay, lambda p=p: self._strike(ch, p, velocity, 0))
+        if valid:
+            self._scheduler.schedule(len(valid) * delay, lambda: self._note_off(ch))
 
     def set_compensated_temperament(self, enabled: bool):
         self.use_compensated_temperament = bool(enabled)
 
+    def wait_idle(self, timeout: float = 2.0) -> None:
+        """Waits until all queued MIDI actions have run (tests / shutdown)."""
+        self._scheduler.drain(timeout)
+
     def close(self):
-        if self._opened and self._hmidi and self._hmidi.value:
-            try:
+        if self._opened:
+            def _sustain_off():
                 for ch in ALL_CHANNELS:
-                    self._send_short_msg(0x000040B0 | ch)  # Sustain off
+                    self._send(0x000040B0 | ch)
+
+            self._scheduler.schedule(0, _sustain_off)
+            self._scheduler.drain(0.5)
+        self._scheduler.stop()
+        if self._opened and self._hmidi and self._hmidi.value and self._send_fn is not None and winmm is not None:
+            try:
                 winmm.midiOutReset(self._hmidi)
                 winmm.midiOutClose(self._hmidi)
             except Exception:
                 log.debug("MIDI close failed", exc_info=True)
-            self._opened = False
-            self._hmidi = None
+        self._opened = False
+        self._hmidi = None

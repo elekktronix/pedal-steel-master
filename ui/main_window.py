@@ -3,10 +3,11 @@
 """
 
 import logging
+import time
 from pathlib import Path
 from typing import Optional, Set
 
-from PySide6.QtCore import QTimer, Qt
+from PySide6.QtCore import QByteArray, QTimer, Qt
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import (
     QApplication,
@@ -31,6 +32,7 @@ from core.audio import MidiAudioEngine, compute_newman_cents
 from core.models import Neck, NeckType, SteelGuitar, migrate_half_stop_tokens
 from core.presets import build_standard_d10_guitar
 from core.profile_manager import ProfileManager
+from core.session import load_session, save_session
 from core.settings import load_settings, save_settings
 from core.star_map_engine import ENHARMONIC_FLAT_NAMES, StarMapEngine, StarMapLandmark
 from core.voicing_solver import VoicingSolver
@@ -46,7 +48,7 @@ from ui.progression_panel import ProgressionSequencerWidget
 from ui.relative_moves_widget import RelativeMovesWidget
 from ui.scale_finder_widget import ScaleFinderWidget
 from ui.stance_chord_inspector_dialog import StanceChordInspectorDialog
-from ui.themes import DARK_THEME_QSS, LIGHT_THEME_QSS
+from ui.themes import DARK_THEME_QSS, LIGHT_THEME_QSS, ThemeManager
 from ui.voicing_dialog import VoicingFinderWidget
 from core.theory import to_root_name
 
@@ -66,6 +68,9 @@ class MainWindow(QMainWindow):
         self.audio = MidiAudioEngine()
         self.audio.set_compensated_temperament(self.settings.get("use_newman_tuning", False))
         self._batch_depth = 0  # >0 while apply_stance() is running; defers dependent refreshes
+        # Pedal/bar swells (E-11): strings struck by the last pluck and how long they may still ring.
+        self._sounding: dict = {}
+        self._sounding_until = 0.0
 
         # Load persisted guitar setup if present, otherwise build standard D10
         storage_dir = ProfileManager.ensure_storage_dir() or getattr(
@@ -97,6 +102,67 @@ class MainWindow(QMainWindow):
         self._refresh_copedant_dropdown()
         self._update_star_map_ribbon()
         self._update_relative_moves_hub()
+        self._restore_session(load_session())
+
+    # -------------------------------------------------------------------------
+    # Session persistence (E-12)
+    # -------------------------------------------------------------------------
+    def _capture_session(self) -> dict:
+        return {
+            "neck_index": self.current_neck_idx,
+            "neck_name": self.guitar.necks[self.current_neck_idx].name,
+            "fret": self.canvas.bar_fret,
+            "controllers": sorted(self.canvas.engaged_levers),
+            "pocket": sorted(self.canvas.active_pocket),
+            "target_root": self.harmonic_panel.get_root(),
+            "target_chord": self.harmonic_panel.get_chord_type(),
+            "display_mode": self.canvas.display_mode,
+            "sequencer_visible": self.dock_sequencer.isVisible(),
+            "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
+            "window_state": bytes(self.saveState().toBase64()).decode("ascii"),
+        }
+
+    def _restore_session(self, session: dict):
+        """Restores the last session; invalid or missing entries are skipped."""
+        if not session:
+            return
+        try:
+            idx = session.get("neck_index")
+            # Prefer the neck with the same name (the list may have changed), else the index.
+            by_name = next(
+                (i for i, n in enumerate(self.guitar.necks) if n.name == session.get("neck_name")), None
+            )
+            if by_name is not None:
+                idx = by_name
+            if isinstance(idx, int) and 0 <= idx < len(self.guitar.necks) and idx != self.current_neck_idx:
+                self._select_copedant_index(idx)
+
+            root = session.get("target_root")
+            if root == "None":
+                self.harmonic_panel.combo_root.setCurrentText("None")
+            elif root:
+                self.harmonic_panel.set_target(root, session.get("target_chord") or "Major")
+
+            if session.get("display_mode") in ("intervals", "notes"):
+                self._set_display_mode(session["display_mode"])
+
+            fret = session.get("fret")
+            if isinstance(fret, int):
+                self.apply_stance(
+                    max(0, min(24, fret)),
+                    set(session.get("controllers") or []),
+                    set(session.get("pocket") or []) or None,
+                    play=False,
+                )
+
+            if session.get("geometry"):
+                self.restoreGeometry(QByteArray.fromBase64(session["geometry"].encode("ascii")))
+            if session.get("window_state"):
+                self.restoreState(QByteArray.fromBase64(session["window_state"].encode("ascii")))
+            if "sequencer_visible" in session:
+                self.dock_sequencer.setVisible(bool(session["sequencer_visible"]))
+        except Exception:
+            log.exception("Could not restore the previous session")
 
     def _init_ui(self):
         central_widget = QWidget(self)
@@ -488,7 +554,36 @@ class MainWindow(QMainWindow):
         self.fret_spin.blockSignals(False)
 
         self.canvas.set_bar_fret(fret)
+        if not self._batch_depth:
+            self._swell_sounding_strings()
         self._refresh_stance_dependents()
+
+    SWELL_WINDOW_SEC = 4.0
+
+    def _swell_sounding_strings(self):
+        """Bends strings that are still ringing to their new pitch after a manual pedal, lever or bar
+        change, like a real steel (E-11). Pulls beyond the bend range re-strike the string softly."""
+        if not self.settings.get("pedal_swells", True) or not self._sounding:
+            return
+        now = time.monotonic()
+        if now > self._sounding_until:
+            self._sounding.clear()
+            return
+        states = {s.string_number: s for s in self.canvas.active_states}
+        cents = self._current_cents(self._sounding.keys())
+        for s_num, struck in list(self._sounding.items()):
+            st = states.get(s_num)
+            if st is None:
+                continue
+            c = cents.get(s_num, 0.0)
+            if not self.audio.glide_string_pitch(s_num, st.active_midi - struck, cents_offset=c):
+                self.audio.play_note(st.active_midi, s_num, velocity=60, cents_offset=c)
+                self._sounding[s_num] = st.active_midi
+        self._sounding_until = now + self.SWELL_WINDOW_SEC
+
+    def _toggle_pedal_swells(self, checked: bool):
+        self.settings["pedal_swells"] = bool(checked)
+        save_settings(self.settings)
 
     def apply_stance(
         self,
@@ -536,10 +631,12 @@ class MainWindow(QMainWindow):
 
     def _on_levers_changed(self, active_levers: set):
         self.canvas.set_engaged_levers(set(active_levers))
+        self._swell_sounding_strings()
         self._refresh_stance_dependents()
 
     def _init_sequencer_dock(self):
         self.dock_sequencer = QDockWidget("Progression Sequencer & Tablature", self)
+        self.dock_sequencer.setObjectName("dock_sequencer")  # required by saveState/restoreState
         self.dock_sequencer.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
 
         self.sequencer = ProgressionSequencerWidget(self)
@@ -743,8 +840,12 @@ class MainWindow(QMainWindow):
         app = QApplication.instance()
         if app:
             app.setStyleSheet(DARK_THEME_QSS if is_dark else LIGHT_THEME_QSS)
+            # Inline widget stylesheets follow the theme too (E-13).
+            ThemeManager.for_app(app).set_dark(is_dark)
         if hasattr(self, "canvas"):
             self.canvas.set_dark_mode(is_dark)
+        if hasattr(self, "circle_widget"):
+            self.circle_widget.set_dark_mode(is_dark)
 
     def _init_popout_windows(self):
         current_neck = self.guitar.necks[self.current_neck_idx]
@@ -872,6 +973,8 @@ class MainWindow(QMainWindow):
             if s.string_number in self.canvas.active_pocket
         }
         self.audio.play_pocket(pitches, roll=roll, cents=self._current_cents(pitches.keys()))
+        self._sounding = dict(pitches)
+        self._sounding_until = time.monotonic() + self.SWELL_WINDOW_SEC
 
     def _apply_solved_voicing(self, fret: int, levers: list, grip_strings: list):
         self.apply_stance(fret, levers, grip_strings)
@@ -1231,6 +1334,7 @@ class MainWindow(QMainWindow):
             log.exception("Error saving active guitar setup")
 
     def closeEvent(self, event):
+        save_session(self._capture_session())
         self._save_active_guitar_setup()
         if hasattr(self, "voicing_finder"):
             self.voicing_finder.close()

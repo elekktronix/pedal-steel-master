@@ -51,6 +51,18 @@ class ProfileManager:
             return False
 
     @classmethod
+    def unique_profile_name(cls, name: str) -> str:
+        """Sanitized name that does not collide with an existing profile ('Name', 'Name 2', ...)."""
+        base = cls.sanitize_name(name)
+        if not base:
+            raise ValueError(f"Invalid profile name: {name!r}")
+        candidate, n = base, 2
+        while cls.profile_exists(candidate):
+            candidate = f"{base} {n}"
+            n += 1
+        return candidate
+
+    @classmethod
     def save_user_profile(cls, name: str, neck: Neck) -> Path:
         filepath = cls._profile_path(name)
         with open(filepath, "w", encoding="utf-8") as f:

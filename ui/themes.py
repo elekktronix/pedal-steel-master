@@ -196,3 +196,161 @@ QComboBox, QSpinBox {
     color: #212529;
 }
 """
+
+
+
+# ---------------------------------------------------------------------------
+# Light-mode adaptation of inline widget stylesheets (E-13)
+# ---------------------------------------------------------------------------
+# Many widgets set inline stylesheets with dark-mode colors. Rather than duplicating every
+# stylesheet, ThemeManager rewrites inline QSS on the fly while light mode is active:
+#   * dark backgrounds (any hue) -> light tint of the same hue
+#   * light text on a remapped/absent background -> dark text of the same hue
+#   * accent colors (blue/green/amber/red buttons, mid lightness) and their text are untouched
+# The original stylesheet is kept on the widget so switching back to dark restores it exactly.
+
+import colorsys
+import re
+
+from PySide6.QtCore import QEvent, QObject
+from PySide6.QtWidgets import QApplication, QWidget
+
+_NAMED = {"white": "#ffffff", "black": "#000000"}
+_COLOR_RE = r"(#[0-9a-fA-F]{6}\b|#[0-9a-fA-F]{3}\b|\bwhite\b|\bblack\b)"
+_DECL_RE = re.compile(
+    r"(?P<prop>(?<![\w-])(?:background-color|background|alternate-background-color|color|selection-color))"
+    r"(?P<sep>\s*:\s*)(?P<val>[^;{}]*)",
+    re.IGNORECASE,
+)
+_BG_PROPS = {"background-color", "background", "alternate-background-color"}
+
+
+def _to_rgb(token: str):
+    h = _NAMED.get(token.lower(), token).lstrip("#")
+    if len(h) == 3:
+        h = "".join(c * 2 for c in h)
+    return tuple(int(h[i:i + 2], 16) / 255.0 for i in (0, 2, 4))
+
+
+def _to_hex(rgb) -> str:
+    return "#" + "".join(f"{max(0, min(255, round(c * 255))):02x}" for c in rgb)
+
+
+def _lightness(token: str) -> float:
+    return colorsys.rgb_to_hls(*_to_rgb(token))[1]
+
+
+def light_background(token: str) -> str:
+    """Dark background -> light tint with the same hue (lightness mirrored into 0.86..0.98)."""
+    h, l, s = colorsys.rgb_to_hls(*_to_rgb(token))
+    return _to_hex(colorsys.hls_to_rgb(h, 0.98 - l * 0.35, min(s, 0.6)))
+
+
+def dark_foreground(token: str) -> str:
+    """Light/mid text (lightness > 0.5) -> dark text with the same hue (lightness 0.15..0.35)."""
+    h, l, s = colorsys.rgb_to_hls(*_to_rgb(token))
+    return _to_hex(colorsys.hls_to_rgb(h, 0.15 + (1.0 - l) * 0.4, s))
+
+
+def _remap_block(body: str) -> str:
+    """Remaps one declaration block (text between braces, or a bare declaration list)."""
+    bg_tokens = []
+    for m in _DECL_RE.finditer(body):
+        if m.group("prop").lower() in _BG_PROPS:
+            bg_tokens += re.findall(_COLOR_RE, m.group("val"))
+    # Text is recoloured only if the block's own background is absent or was a dark (remapped) one.
+    bg_is_dark_or_absent = not bg_tokens or all(_lightness(c) < 0.35 for c in bg_tokens)
+
+    def _decl(m):
+        prop = m.group("prop").lower()
+        val = m.group("val")
+        if prop in _BG_PROPS:
+            val = re.sub(_COLOR_RE, lambda c: light_background(c.group(0)) if _lightness(c.group(0)) < 0.35 else c.group(0), val)
+        elif bg_is_dark_or_absent:
+            val = re.sub(_COLOR_RE, lambda c: dark_foreground(c.group(0)) if _lightness(c.group(0)) > 0.5 else c.group(0), val)
+        return f"{m.group('prop')}{m.group('sep')}{val}"
+
+    return _DECL_RE.sub(_decl, body)
+
+
+def to_light_stylesheet(qss: str) -> str:
+    """Light-mode version of a dark-mode inline stylesheet (idempotent)."""
+    if "{" not in qss:
+        return _remap_block(qss)
+    return re.sub(r"\{([^{}]*)\}", lambda m: "{" + _remap_block(m.group(1)) + "}", qss)
+
+
+class ThemeManager(QObject):
+    """Keeps inline widget stylesheets consistent with the active theme (installed app-wide)."""
+
+    ORIG = "_psg_dark_qss"
+    MAPPED = "_psg_light_qss"
+    _instances: dict = {}
+
+    @classmethod
+    def for_app(cls, app: QApplication) -> "ThemeManager":
+        """The single manager for an application. Two managers would fight over the same widgets."""
+        mgr = cls._instances.get(id(app))
+        if mgr is None:
+            mgr = cls(app)
+            cls._instances[id(app)] = mgr
+        return mgr
+
+    def __init__(self, app: QApplication):
+        super().__init__(app)
+        self.app = app
+        self.is_dark = True
+        # Changing a stylesheet sends StyleChange to the widget AND all its descendants. Handling
+        # those re-entrantly nests handlers per tree level, so widgets are queued and processed
+        # iteratively instead.
+        self._pending: list = []
+        self._busy = False
+        app.installEventFilter(self)
+
+    def set_dark(self, is_dark: bool):
+        self.is_dark = is_dark
+        self._pending.extend(self.app.allWidgets())
+        self._drain()
+
+    def eventFilter(self, obj, event):
+        # StyleChange: a stylesheet was set. Polish: sent before a widget is first shown; needed
+        # because Qt skips StyleChange for repeated setStyleSheet calls on never-shown widgets.
+        if event.type() in (QEvent.StyleChange, QEvent.Polish) and isinstance(obj, QWidget):
+            self._pending.append(obj)
+            if not self._busy:
+                self._drain()
+        return False
+
+    def _drain(self):
+        self._busy = True
+        try:
+            while self._pending:
+                w = self._pending.pop()
+                try:
+                    self._apply(w)
+                except RuntimeError:
+                    pass  # widget was deleted on the C++ side
+        finally:
+            self._busy = False
+
+    def _apply(self, w: QWidget):
+        current = w.styleSheet()
+        mapped = w.property(self.MAPPED)
+        if mapped is not None and current == mapped:
+            # The widget still shows our light mapping.
+            if self.is_dark:
+                original = w.property(self.ORIG)
+                w.setProperty(self.ORIG, None)
+                w.setProperty(self.MAPPED, None)
+                w.setStyleSheet(original or "")
+            return
+        # A fresh stylesheet set by application code (or none).
+        w.setProperty(self.ORIG, None)
+        w.setProperty(self.MAPPED, None)
+        if self.is_dark or not current:
+            return
+        light = to_light_stylesheet(current)
+        if light != current:
+            w.setProperty(self.ORIG, current)
+            w.setProperty(self.MAPPED, light)
+            w.setStyleSheet(light)

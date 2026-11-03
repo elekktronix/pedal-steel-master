@@ -64,8 +64,14 @@ class PearlsEngine:
             ("A & B", ("A", "B")), ("F Lever", ("F",)), ("D Lever", ("D",)),
         ]:
             stance = resolve_stance(neck, tokens, roles)
-            if stance is not None:
-                stances.append((stance_name, stance))
+            if stance is None:
+                continue
+            # Skip stances that don't change either string of the pair: they would only
+            # duplicate the open row (D-34).
+            controllers = {**neck.pedals, **neck.knee_levers}
+            if stance and not any(controllers[c].changes.get(s, 0) for c in stance for s in string_pair):
+                continue
+            stances.append((stance_name, stance))
         if any(s not in {sp.string_number for sp in neck.open_tuning} for s in string_pair):
             return []
 
