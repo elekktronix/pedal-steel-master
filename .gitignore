@@ -1,0 +1,22 @@
+# Python
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# PyCharm
+.idea/
+
+# Nuitka / build output
+*.build/
+*.dist/
+*.onefile-build/
+dist/
+build/
+*.exe
+
+# Real log files: may be sensitive. Keep them out of Git.
+*.log
+*.txt.log
+local_logs/
