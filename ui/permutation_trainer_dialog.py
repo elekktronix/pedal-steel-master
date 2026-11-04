@@ -325,7 +325,7 @@ class PermutationTrainerDialog(QDialog):
             return
         if sound == CLICK_CHIRP:
             if self._chirp is None:
-                from ui.voice_leader_dialog import MetronomeChirp
+                from ui.metronome_chirp import MetronomeChirp
                 self._chirp = MetronomeChirp()
             self._chirp.play(is_downbeat=accent)
             return

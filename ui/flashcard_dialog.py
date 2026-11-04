@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 from core.flashcard_engine import DrillResult, FlashcardEngine, FlashcardPrompt
 from core.models import Neck
 from core.star_map_engine import StarMapLandmark
-from ui.voice_leader_dialog import MetronomeChirp
+from ui.metronome_chirp import MetronomeChirp
 
 
 class FlashcardDrillDialog(QDialog):

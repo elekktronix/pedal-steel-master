@@ -35,15 +35,15 @@ class MainMenuBuilder:
         action_exit.triggered.connect(main_window.close)
         file_menu.addAction(action_exit)
 
-        # 2. View Menu (Sequencer dock toggle + tool popouts)
+        # 2. View Menu (Progression Studio dock toggle + tool popouts)
         view_menu = menubar.addMenu("&View")
 
-        action_toggle_seq = main_window.dock_sequencer.toggleViewAction()
-        action_toggle_seq.setText("Show Progression Sequencer Dock")
+        action_toggle_seq = main_window.dock_studio.toggleViewAction()
+        action_toggle_seq.setText("Show Progression Studio")
         view_menu.addAction(action_toggle_seq)
 
-        action_pop_seq = QAction("⏏️ Pop Out Sequencer (Floating)", main_window)
-        action_pop_seq.triggered.connect(main_window._pop_out_sequencer)
+        action_pop_seq = QAction("⏏️ Pop Out Progression Studio (Floating)", main_window)
+        action_pop_seq.triggered.connect(main_window._pop_out_studio)
         view_menu.addAction(action_pop_seq)
 
         view_menu.addSeparator()

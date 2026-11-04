@@ -19,7 +19,8 @@ Each engine is a class of `@classmethod`s with no instance state. **Copedant-awa
 | `copedant_compare` (E-25) | `diff_copedants(base, mod)`, `compare_copedants(base, mod)`, `scan_chords(neck)` | `List[CopedantDiffItem]`, `CopedantComparison` | ✅ (resolver; every reported way re-checked with `grip_matches_chord`) | compare dialog (menu + copedant editor) |
 | `chord_atlas` (E-27/E-28) | `build_atlas(neck)`, `filter_atlas`, `by_stance`, `coverage`, `grips_for_config`, `find_chord`, `sort_positions`, `find_neighbors` | `ChordAtlas` / `List[AtlasEntry]` | ✅ (compare scan; every way checked with `grip_matches_chord` in tests) | chord atlas dialog |
 | `permutation_engine.PermutationEngine` | `generate_sequence(perm_id, strings, cycles)` | `List[PickEvent]` | n/a | permutation trainer, sequencer arpeggiate |
-| `tab_generator.TabGenerator` | `generate_ascii_tab(string_count, steps)` | str | n/a | sequencer |
+| `tab_generator.TabGenerator` | `generate_ascii_tab(string_count, steps)` | str | n/a | Progression Studio |
+| `progression_studio` (E-32) | `StudioProgression`, `parse_progression_text`, `cadence_progression`, `dice_progression`, `preset_progression`, `fill_stances`, `identify_grip_chord`, `tab_steps`, `PlaybackPlan` | dataclasses / step lists | ✅ (presets via roles; voicings via the voice leader) | Progression Studio |
 | `progression_presets` | `PROGRESSION_PRESETS`, `resolve_preset_steps(preset, neck)` | presets with role tokens → steps with IDs | ✅ | sequencer |
 | `circle_of_fifths.CircleOfFifthsEngine` | `get_diatonic_chords(key)` | `List[DiatonicChordInfo]` | n/a | circle widget |
 | `exporter.CopedantPdfExporter` | `export_neck_sheet(...)` | PDF file | ✅ | main (File menu) |
@@ -88,6 +89,19 @@ Other functions:
   - pedal changes × 3.
 
   It **always returns one entry per measure**: `None` for rests and for chords with no voicing.
+- For types containing "7"/"9"/"dim" the 5th is left out first; if that finds nothing (Gmaj7 on E9 found none), the full chord is searched (D-47).
+
+## progression_studio.py (E-32)
+
+The Progression Studio's model, Qt-free. A `StudioProgression` (name, key, time signature, tempo, `neck_name`) holds `StudioStep`s: optional chord (`root`, CHORD_FORMULAS `chord_type`), `beats`, optional stance (`fret`, `controllers`, `grip`), `pinned`, `style` (`block` / `roll` / `arpeggio` with a Franklin `perm_id`) and a `label` for unnamed grips. Steps carry durations, so bars hold one chord or several.
+
+- **Stale stances are impossible (D-45):** `set_chord` with a different chord clears the stance and the pin. Loading a progression made on another neck clears its stances.
+- **Typed chords:** `parse_chord_symbol` ("Am7", "F#m7b5", "Bbmaj7", "C6/9", "G/B" with the bass ignored) and `parse_progression_text`: without `|` each chord is a bar; with `|` the chords of a bar share it (first chords get the extra beats); `:n` sets beats, `%` repeats, `-`/`N.C.` rests. `format_progression_text` is the inverse.
+- **Generated:** `CADENCES` (ii–V–I, iiø–V–i, iii–vi–ii–V, I–vi–IV–V, I–IV–I–V, 12-bar blues) via `cadence_progression(kind, key)`; `dice_progression` (two rolled degrees, each approached by its own V7); `preset_progression` maps a practice preset onto the neck with its stances **pinned**.
+- **Voice leading:** `fill_stances(neck, steps, constraints, only_missing)` runs `VoiceLeadingEngine` on each run of free chord steps between anchors (pinned stances; with `only_missing`, every voiced step), starting near the anchor before it. Returns the unsolvable indices.
+- **Captured grips:** `identify_grip_chord(neck, fret, controllers, grip, hint)` resolves the grip; the hint (harmonic target) wins when the grip fits it, else bass-first roots, exact matches before ones missing only the 5th.
+- **Files:** `to_dict` writes the voice leader's `.cp` format (chord per beat slot; a chord held into a bar is repeated on beat 1) plus a `studio` block with the exact steps; `from_dict` prefers that block, else reads the slots (each chord lasts to the next slot or the bar end; empty bars are rests).
+- **Playback:** `PlaybackPlan.build(prog, first, last, count_in_bars, loop).at(k)` says, for beat k after Play, whether it is a count-in beat, accented (bar start), which step starts, or done. `arpeggio_strings` gives the permutation order (one cycle per beat); `tab_steps` turns voiced steps into `TabStep`s (arpeggios as one column per note with the pick finger).
 
 ## scale_engine.py
 

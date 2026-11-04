@@ -19,7 +19,7 @@
 | Resolved strings | `FretboardCanvas.active_states` (recomputed in `update_state()`) | read directly by MainWindow, the permutation trainer, etc. |
 | Detected chord label | `FretboardCanvas.detected_chord_label` (overwritten by `set_explicit_banner`) | — |
 | Preferences | `MainWindow.settings` dict → `app_settings.json` | menu check states, NNS button |
-| Sequencer steps | `ProgressionSequencerWidget.steps: List[TabStep]` | its table |
+| Progression (E-32) | `ProgressionStudioWidget.progression: StudioProgression` (chords, beats, stances, styles) | its step cards, chord text and step editor |
 
 `FretboardCanvas.update_state()` is the **recompute hub**. Every setter (`set_neck`, `set_bar_fret`, `set_engaged_levers`, `set_active_pocket`, `set_chord_analysis`, `set_scale_analysis`, `set_show_*`) calls it. It re-runs the resolver and `ChordIdentifier` and then repaints.
 
@@ -44,7 +44,7 @@ HalfStopLeverButton click (240 ms single/double click timer)
 `_on_bar_fret_changed` syncs the slider and spinbox with signals blocked, then calls `canvas.set_bar_fret`. That emits `fret_changed`, which re-enters `_on_bar_fret_changed` and stops there because the value is unchanged. It then refreshes the hub, the inspector and the circle.
 
 ### 3. Programmatic "apply stance" — `MainWindow.apply_stance(fret, controllers, pocket=None, *, play=True, banner=None)`
-Used by the star-map ribbon and dialog, scale steps, circle chords, voicing finder, sequencer steps, relative moves, pearls, flashcards and the voice leader (via its `voicing_applied` signal).
+Used by the star-map ribbon and dialog, scale steps, circle chords, voicing finder, Progression Studio steps (`stance_requested` → `apply_stance(..., play=False, banner=)`, then `_play_studio_step`), relative moves, pearls and flashcards.
 ```
 _batch_depth += 1
   canvas.set_bar_fret(f); _sync_fret_widgets(f)        (dependent refreshes deferred)
@@ -102,8 +102,11 @@ At the end of `MainWindow.__init__`, `_restore_session(load_session())` runs. It
 | `ChordAtlasDialog.scale_requested` (E-31) | str,str,str,str,int (scale root, scale, chord root, chord type, fret or -1) | `_open_scale_for_chord`: `scale_finder.set_target`, range fret-1..fret+2 when a voicing is selected, `select_chord`, show |
 | `FretboardCanvas.quiz_note_clicked` (E-30 phase 3) | object (BoxNote) | `scale_finder.answer_quiz` (replaces `overlay_step_clicked` while the quiz runs; ghosts are not clickable then) |
 | `CircleOfFifthsWidget.chord_triggered` | str,str,bool,set | `_on_circle_chord_triggered` (the 4th arg, allowed mechanics, is dropped) |
-| `ProgressionSequencerWidget.step_activated` | int,list,set | `_apply_sequencer_step` |
-| `VoiceLeaderDialog.voicing_path_applied` / `voicing_applied` | list[(idx, VoicingMatch)] / int,list,list | `_apply_voice_leader_path` / `_apply_solved_voicing` |
+| `ProgressionStudioWidget.stance_requested` (E-32) | int,list,list,str | `apply_stance(fret, controllers, grip, play=False, banner=)` |
+| `ProgressionStudioWidget.play_step_requested` | str,list,float (style, strings in play order, seconds between notes) | `_play_studio_step`: block/roll → `_play_pocket(roll=)`; arpeggio → `audio.play_note(..., delay=i*dt)` per string |
+| `ProgressionStudioWidget.click_requested / silence_requested` | bool,str / — | `audio.play_click(accent, sound)` / `audio.silence_all` |
+| `ProgressionStudioWidget.capture_requested` | bool (replace the selected step) | `_capture_into_studio`: `identify_grip_chord` (harmonic target as hint) → `studio.add_captured_step` |
+| Circle of fifths "Auto-Add to Progression Studio" | — | `studio.add_chord_step` (pinned) |
 | `StanceChordInspectorDialog.grip_applied` | set | `_apply_pocket_preset` |
 | `StarMapWidget.landmark_selected`, `StringsOfPearlsDialog.step_selected`, `FlashcardDrillDialog.landmark_verified` | int,set,set | `_on_star_map_dialog_selected` |
 | `CopedantEditorDialog.neck_updated` | — | `_on_copedant_modified` |
@@ -114,12 +117,14 @@ At the end of `MainWindow.__init__`, `_restore_session(load_session())` runs. It
 ## Windows and dialog lifetimes
 
 - **Created once at startup and toggled with show/hide** (`Qt.Window` children): scale finder, circle of fifths. (The voicing finder window was retired in E-28: "🔍 Chord Finder", the harmonic panel's Find button and View ▸ Chord Finder open the Chord Atlas in Find mode.) The sequencer is a `QDockWidget`.
-- **Lazily created and cached:** voice leader, stance inspector.
+- **Lazily created and cached:** stance inspector.
+- **Dock:** the Progression Studio (`dock_progression_studio`, bottom area by default; the old `dock_sequencer` name is not reused so a saved window state can't squeeze it into the side). The Voice Leader window and the Sequencer dock were removed in E-32.
 - **Modeless, one instance (`MainWindow._perm_trainer`, deleted on close):** permutation trainer. It follows `canvas.pocket_changed` live (it plays the 4 lowest pocket strings), reads the notes from `canvas.active_states` on every tick, and opening it with fewer than 4 pocket strings first selects the book's group 8-7-6-5. Tempo changes apply while running (`Qt.PreciseTimer`). The click sound and mode are selectable and persisted (`perm_click_sound`, `perm_click_mode`). Hiding or closing it stops the workout.
 - **Modeless, one instance (`MainWindow._compare_dlg`, deleted on close):** Compare Copedants (E-25), opened from Copedant ▸ Compare Copedants…. The baseline is the active neck; the modified side defaults to a copy of it or the next neck. The main window stays usable. `_load_current_neck` calls `dlg.set_active_neck(idx, guitar)`, which re-scans only if the selected neck objects changed. Double-clicking a way on the inactive neck emits `activate_neck_requested(idx)` (→ `_select_copedant_index`) and then `stance_selected` (→ `_on_triad_grip_selected`). Filters: a sticky chord-type menu, no-5th shells, max controllers, gains/losses, and "only using" controller toggles. Opened from the editor's "Compare to Saved" instead, the dialog is modal and applies nothing.
 - **Modeless, one instance (`MainWindow._atlas_dlg`, deleted on close):** Chord Atlas (E-27), opened from Copedant ▸ Chord Atlas…. It shows the neck combo ("Follow active neck" on by default; picking another neck turns it off), "Show at fret", a root filter, the shared `ChordFilterBar` and grip configuration (source, 3/4/5 strings, max span, custom groups). Its views are By chord, By stance and Coverage; chord and stance rows fill their children lazily on expand. `_load_current_neck` calls `set_active_neck`, and `canvas.pocket_changed` feeds `set_current_pocket`. Double-click behaves as in Compare (`activate_neck_requested`, then `stance_selected` → `_on_triad_grip_selected`). Atlases are cached per neck object. **Mode** combo: *Explore a position* (the views above) or *Find a chord* (E-28): root + type, "tones that must sound" checkboxes (untick for rootless/shell voicings), up-to-fret, hide awkward, sort; a positions table with Fret / Pedals / Ergonomics / Strings / Inversion / Intervals / Missing. `MainWindow._open_chord_finder` opens it in Find mode on the harmonic target (`set_find_target`); Find-mode combo changes emit `target_changed`. The **Circle-of-Fifths radar** (bottom, checkable) uses `chord_atlas.find_neighbors` (strict atlas matching, E-29) on the selected way or position, debounced 250 ms. Double-clicking a move emits `stance_selected` with the move's chord, so the harmonic target follows. The positions table is filled with column auto-sizing off (resize-to-contents made every `setItem` re-measure: 16 ms per cell). The filter controls (chord-type menu, inversions, shells, max controllers, pedal/lever toggles with a match mode: Exactly these (default) / Including these / Only these (and open)) live in `ui/chord_filter_bar.py` and are shared with Compare Copedants.
 - **Modal, created per open:** copedant editor, profile manager, star map, pearls, flashcards, triad explorer (E-19: `grip_selected` → `MainWindow._on_triad_grip_selected`, which sets the harmonic target and then calls `apply_stance`). Star map, pearls and flashcards receive the active neck.
-- The sequencer gets `set_neck(neck)` on every neck switch; presets are mapped onto that neck with `resolve_preset_steps` and refused for the other tuning.
+- The Progression Studio gets `set_neck(neck)` on every neck switch. If the neck's name or controllers changed it stops, clears every stance (pinned too) and re-voices the chords for the new neck. Presets are mapped onto the neck with `resolve_preset_steps` and refused for the other tuning.
+- **Studio transport:** a single-shot `Qt.PreciseTimer` re-armed against an absolute beat grid (`t0 + k·60/BPM`); a BPM change keeps the last beat and re-anchors. Play runs beat 1 (or the first count-in click) immediately; clicks and notes go through the MIDI scheduler. Editing the progression stops playback; hiding the dock stops it too.
 
 ## Coupling violations (cleanup targets)
 

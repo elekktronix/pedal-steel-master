@@ -163,8 +163,8 @@ class FakeAudio:
         self.calls.append(("glide", string_num, semitone_delta))
         return abs(semitone_delta) <= 2
 
-    def play_note(self, pitch, string_num=None, velocity=95, cents_offset=0.0):
-        self.calls.append(("note", string_num, pitch))
+    def play_note(self, pitch, string_num=None, velocity=95, cents_offset=0.0, delay=0.0):
+        self.calls.append(("note", string_num, pitch) if not delay else ("note", string_num, pitch, delay))
 
     def __getattr__(self, name):
         return lambda *a, **k: self.calls.append((name, a, k))
@@ -438,6 +438,155 @@ class MainWindowFeatureTests(unittest.TestCase):
         btn.click()
         self.assertIsNone(sf.selected_chord)
         self.assertEqual(canvas.overlay_chord_pcs, set())
+
+    def _studio_window(self):
+        w = self._window()
+        w.show()
+        w.dock_studio.show()
+        st = w.studio
+        st.combo_count_in.setCurrentIndex(st.combo_count_in.findData(0))
+        st.combo_click.setCurrentText("Woodblock")
+        return w, st
+
+    def test_studio_starts_on_beat_one_and_keeps_time(self):  # E-32, D-43, D-44
+        import time as _time
+        from PySide6.QtCore import QEventLoop, Qt, QTimer
+
+        w, st = self._studio_window()
+        st.load_cadence("country")
+        self.assertTrue(all(s.has_stance for s in st.steps))
+        w.audio.calls.clear()
+        st.play()
+        first = st.steps[0]
+        # Beat 1 happens on the click of Play: stance on the fretboard, click and chord queued together.
+        self.assertEqual((w.canvas.bar_fret, w.canvas.engaged_levers, w.canvas.active_pocket),
+                         (first.fret, set(first.controllers), set(first.grip)))
+        self.assertEqual([c[0] for c in w.audio.calls[:2]], ["play_click", "play_pocket"])
+        self.assertTrue(w.audio.calls[0][2]["accent"])
+        self.assertEqual(st.beat_timer.timerType(), Qt.PreciseTimer)
+        st.stop()
+        self.assertIn("silence_all", [c[0] for c in w.audio.calls])
+
+        # Real timing at 300 BPM: every click lands on the beat grid (no CoarseTimer drift).
+        st.spin_bpm.setValue(300)
+        clicks = []
+        st.click_requested.connect(lambda *_: clicks.append(_time.perf_counter()))
+        st.play()
+        loop = QEventLoop()
+        QTimer.singleShot(200 * 9 + 60, loop.quit)
+        loop.exec()
+        st.stop()
+        self.assertGreaterEqual(len(clicks), 9)
+        errors = [abs((t - clicks[0]) - k * 0.2) for k, t in enumerate(clicks)]
+        self.assertLess(max(errors), 0.025, errors)
+
+    def test_studio_count_in_loop_range_and_end(self):  # E-32
+        w, st = self._studio_window()
+        st.load_cadence("country")  # 4 bars of 4/4
+        st.combo_count_in.setCurrentIndex(st.combo_count_in.findData(1))
+        st.cb_loop.setChecked(False)
+        fret_before = w.canvas.bar_fret
+        st.play()
+        st.beat_timer.stop()
+        for _ in range(3):  # count-in beats 2-4: nothing applied yet
+            st._on_beat()
+            st.beat_timer.stop()
+            self.assertIsNone(st.playing_idx)
+        self.assertEqual(w.canvas.bar_fret, fret_before)
+        st._on_beat()
+        st.beat_timer.stop()
+        self.assertEqual(st.playing_idx, 0)
+        for _ in range(16):
+            st._on_beat()
+            st.beat_timer.stop()
+        self.assertFalse(st.is_playing)  # stopped at the end of bar 4 (no loop)
+
+        st.cb_loop.setChecked(True)
+        st.spin_loop_from.setValue(2)
+        st.spin_loop_to.setValue(3)
+        st.combo_count_in.setCurrentIndex(st.combo_count_in.findData(0))
+        st.play()
+        played = [st.playing_idx]
+        for _ in range(12):
+            st.beat_timer.stop()
+            st._on_beat()
+            played.append(st.playing_idx)
+        st.stop()
+        self.assertEqual(played[0], 1)
+        self.assertEqual(played[::4], [1, 2, 1, 2])
+
+    def test_studio_editing_capture_neck_switch_and_files(self):  # E-32, D-45
+        from core.stances import grip_matches_chord
+
+        w, st = self._studio_window()
+        neck = w.guitar.necks[w.current_neck_idx]
+
+        # Typed chords; every step is voiced and sounds its chord.
+        st.edit_chords.setText("| Am7 D7 | Gmaj7 |")
+        st._apply_text()
+        self.assertEqual([(s.symbol, s.beats) for s in st.steps], [("Am7", 2), ("D7", 2), ("Gmaj7", 4)])
+        for s in st.steps:
+            self.assertTrue(grip_matches_chord(neck, s.fret, s.controllers, s.grip, s.root, s.chord_type,
+                                               require_root=False), s.symbol)
+
+        # Editing a chord re-voices that step for the new chord (no stale voicing).
+        st.select_step(2, audition=False)
+        st.combo_type.setCurrentText("Minor")
+        s = st.steps[2]
+        self.assertEqual(s.symbol, "Gm")
+        self.assertTrue(grip_matches_chord(neck, s.fret, s.controllers, s.grip, "G", "Minor", require_root=False))
+
+        # Capture the fretboard: C (A+B at fret 3) becomes a pinned step after the selection.
+        w.apply_stance(3, {"P1", "P2"}, {8, 6, 5}, play=False)
+        st.btn_capture.click()
+        cap = st.steps[3]
+        self.assertEqual((cap.symbol, cap.fret, cap.controllers, cap.pinned), ("C", 3, ["P1", "P2"], True))
+        st.select_step(0, audition=False)
+        st.btn_use_stance.click()  # Am7 with C-E-G: a rootless Am7, so it is accepted as is
+        self.assertTrue(st.steps[0].pinned)
+        self.assertNotIn("doesn't sound", st.lbl_status.text())
+        st.select_step(1, audition=False)
+        st.btn_use_stance.click()  # D7 with C-E-G: kept (pinned) but flagged
+        self.assertTrue(st.steps[1].pinned)
+        self.assertIn("doesn't sound D7", st.lbl_status.text())
+
+        # Circle of fifths auto-add appends a pinned step.
+        w._on_circle_chord_triggered("G", "Major", True)
+        self.assertEqual((st.steps[-1].symbol, st.steps[-1].pinned), ("G", True))
+
+        # Arpeggio: the notes are queued with growing delays on their own strings.
+        st.select_step(3, audition=False)
+        st.combo_style.setCurrentIndex(st.combo_style.findData("arpeggio"))
+        w.audio.calls.clear()
+        st.select_step(3, audition=True)
+        delays = [c[3] for c in w.audio.calls if c[0] == "note" and len(c) == 4]
+        self.assertTrue(delays and delays == sorted(delays))
+        self.assertIn("A+B", st.tab_text())
+
+        # Save and load keep chords, beats, stances, pins and styles.
+        path = str(Path(self._tmp.name) / "prog.cp")
+        st.save_file(path)
+        saved = [x.to_dict() for x in st.steps]
+        st._clear_steps()
+        st.load_file(path)
+        self.assertEqual([x.to_dict() for x in st.steps], saved)
+
+        # Another neck: stances are re-voiced with that neck's controllers, never replayed.
+        c6_idx = next(i for i, n in enumerate(w.guitar.necks) if n.name == "10-String C6")
+        w._select_copedant_index(c6_idx)
+        c6 = w.guitar.necks[c6_idx]
+        for s in st.steps:
+            if s.has_chord and s.has_stance:
+                self.assertTrue(set(s.controllers) <= set(c6.pedals) | set(c6.knee_levers))
+                self.assertTrue(grip_matches_chord(c6, s.fret, s.controllers, s.grip, s.root, s.chord_type,
+                                                   require_root=False), s.symbol)
+        symbols = [s.symbol for s in st.steps]
+
+        # The progression survives a restart (session).
+        destroy_window(w)
+        w2 = self._window()
+        self.assertEqual([s.symbol for s in w2.studio.steps], symbols)
+        self.assertTrue(all(s.has_stance for s in w2.studio.steps if s.has_chord))
 
     def test_corrupt_session_is_ignored(self):  # E-12
         import core.session as session

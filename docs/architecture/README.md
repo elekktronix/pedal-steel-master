@@ -47,11 +47,11 @@ main.py ──► ui/main_window.py (MainWindow: mediator + "current stance" own
 
 | Status | Modules |
 |---|---|
-| Live core | models, theory, resolver, stances, presets, ergonomics, chord_identifier, voicing_solver, voice_leader, scale_engine, relative_moves, star_map_engine, pearls_engine, flashcard_engine, permutation_engine, triad_explorer, copedant_compare, chord_atlas, tab_generator, progression_presets, grip_presets, circle_of_fifths, exporter, audio, settings, profile_manager |
-| Live UI | main_window, main_menu_builder, fretboard_canvas, lever_panel, grip_pocket_bar, harmonic_target_panel, relative_moves_widget, progression_panel, scale_finder_widget, circle_of_fifths_widget, voice_leader_dialog, stance_chord_inspector_dialog, copedant_editor_dialog, manage_profiles_dialog, star_map_widget, pearls_widget, flashcard_dialog, permutation_trainer_dialog, triad_explorer_dialog, copedant_compare_dialog, chord_atlas_dialog, chord_filter_bar, profile_prompts, themes |
+| Live core | models, theory, resolver, stances, presets, ergonomics, chord_identifier, voicing_solver, voice_leader, scale_engine, relative_moves, star_map_engine, pearls_engine, flashcard_engine, permutation_engine, triad_explorer, copedant_compare, chord_atlas, tab_generator, progression_presets, progression_studio, grip_presets, circle_of_fifths, exporter, audio, settings, profile_manager |
+| Live UI | main_window, main_menu_builder, fretboard_canvas, lever_panel, grip_pocket_bar, harmonic_target_panel, relative_moves_widget, progression_studio_widget, metronome_chirp, scale_finder_widget, circle_of_fifths_widget, stance_chord_inspector_dialog, copedant_editor_dialog, manage_profiles_dialog, star_map_widget, pearls_widget, flashcard_dialog, permutation_trainer_dialog, triad_explorer_dialog, copedant_compare_dialog, chord_atlas_dialog, chord_filter_bar, profile_prompts, themes |
 | Tests | `tests/test_core_integrity.py` (data integrity, editor, profiles), `tests/test_engines.py` (engines, content correctness, MainWindow integration) |
 
-The legacy standalone split/half-stop dialogs and `presets_old.py` were deleted (D-29). `ui/voicing_dialog.py` (Voicing Finder window) was removed in E-28; its search and radar live in the Chord Atlas. Split and half-stop editing lives in **`ui/copedant_editor_dialog.py` tabs 3 and 4**.
+The legacy standalone split/half-stop dialogs and `presets_old.py` were deleted (D-29). `ui/voicing_dialog.py` (Voicing Finder window) was removed in E-28; its search and radar live in the Chord Atlas. `ui/voice_leader_dialog.py` and `ui/progression_panel.py` were removed in E-32; both live on in the Progression Studio. Split and half-stop editing lives in **`ui/copedant_editor_dialog.py` tabs 3 and 4**.
 
 ## Terminology
 

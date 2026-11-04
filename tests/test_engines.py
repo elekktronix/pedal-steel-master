@@ -271,6 +271,163 @@ class VoiceLeaderTests(unittest.TestCase):
         self.assertIsNone(res[2])
         self.assertIsNotNone(res[3])
 
+    def test_seventh_chords_fall_back_to_the_full_chord(self):  # D-47
+        neck = presets.build_standard_emmons_e9_10()
+        prog = ChordProgression.from_dict({"measures": [
+            {"id": 0, "slots": [{"beat": 1, "chord": {"root": "G", "type": "Major 7th"}}]}]})
+        v = VoiceLeadingEngine.solve_progression(neck, prog, VoiceLeadingConstraints(max_fret=12))[0]
+        self.assertIsNotNone(v)
+        self.assertTrue(grip_matches_chord(neck, v.fret, v.engaged_levers, v.grip_strings, "G", "Major 7th",
+                                           require_root=False))
+
+
+class ProgressionStudioTests(unittest.TestCase):  # E-32
+    def test_chord_text(self):
+        from core.progression_studio import format_progression_text, parse_chord_symbol, parse_progression_text
+
+        cases = {"Am7": ("A", "Minor 7th"), "F#m7b5": ("F#", "Half-Diminished"), "Bbmaj7": ("Bb", "Major 7th"),
+                 "C+": ("C", "Augmented"), "Edim7": ("E", "Diminished 7th"), "G/B": ("G", "Major"),
+                 "C6/9": ("C", "6/9"), "Dsus4": ("D", "Sus4"), "E7#9": ("E", "Dominant 7#9"), "cm": ("C", "Minor"),
+                 "GΔ7": ("G", "Major 7th"), "Bø7": ("B", "Half-Diminished")}
+        for text, want in cases.items():
+            self.assertEqual(parse_chord_symbol(text), want, text)
+        for bad in ("H7", "Gweird", ""):
+            with self.assertRaises(ValueError):
+                parse_chord_symbol(bad)
+
+        steps = parse_progression_text("| G | C | Am D7 | % - |", 4)
+        self.assertEqual([(s.symbol, s.beats) for s in steps],
+                         [("G", 4), ("C", 4), ("Am", 2), ("D7", 2), ("D7", 2), ("Rest", 2)])
+        again = parse_progression_text(format_progression_text(steps, 4), 4)
+        self.assertEqual([(s.root, s.chord_type, s.beats) for s in again],
+                         [(s.root, s.chord_type, s.beats) for s in steps])
+        self.assertEqual([s.beats for s in parse_progression_text("Am7:2 D7:2 G", 3)], [2, 2, 3])
+        self.assertEqual([s.beats for s in parse_progression_text("| A B C |", 4)], [2, 1, 1])
+
+    def test_generated_progressions(self):
+        import random
+
+        from core.progression_studio import cadence_progression, dice_progression
+        from core.theory import NOTE_TO_SEMITONE
+
+        self.assertEqual([s.symbol for s in cadence_progression("major_251", "C").steps], ["Dm7", "G7", "Cmaj7", "Cmaj7"])
+        self.assertEqual([s.symbol for s in cadence_progression("minor_251", "A").steps], ["Bm7b5", "E7", "Am7", "Am7"])
+        blues = cadence_progression("blues12", "G").steps
+        self.assertEqual(len(blues), 12)
+        self.assertEqual([s.symbol for s in blues[8:10]], ["D7", "C7"])
+        prog, text = dice_progression("G", rng=random.Random(4))
+        self.assertEqual(len(prog.steps), 4)
+        for v7, target in (prog.steps[0:2], prog.steps[2:4]):  # each target is approached by its own V7
+            self.assertEqual(v7.chord_type, "Dominant 7th")
+            self.assertEqual((NOTE_TO_SEMITONE[v7.root] - NOTE_TO_SEMITONE[target.root]) % 12, 7)
+        self.assertIn("→", text)
+
+    def test_file_round_trip_and_legacy_cp(self):
+        from core.progression_studio import STYLE_ARPEGGIO, StudioProgression, parse_progression_text
+
+        prog = StudioProgression(name="t", key="G", time_signature="3/4", tempo=90,
+                                 steps=parse_progression_text("| G | C D | Em |", 3), neck_name="N")
+        prog.steps[0].set_stance(3, ["P1"], [8, 6, 5], pinned=True)
+        prog.steps[1].style = STYLE_ARPEGGIO
+        back = StudioProgression.from_dict(prog.to_dict())
+        self.assertEqual([s.to_dict() for s in back.steps], [s.to_dict() for s in prog.steps])
+        self.assertEqual((back.time_signature, back.tempo, back.neck_name), ("3/4", 90, "N"))
+
+        # Without the "studio" block (another app, or an old voice-leader file): chords per beat slot.
+        legacy = {k: v for k, v in prog.to_dict().items() if k != "studio"}
+        steps = StudioProgression.from_dict(legacy).steps
+        self.assertEqual([(s.symbol, s.beats) for s in steps], [("G", 3), ("C", 2), ("D", 1), ("Em", 3)])
+        old_vl = {"timeSignature": "4/4", "measures": [
+            {"id": 0, "slots": [{"beat": 1, "chord": {"root": "C", "type": "Minor 7"}}]},
+            {"id": 1, "slots": [{"beat": 1}]},
+            {"id": 2, "slots": [{"beat": 3, "chord": {"root": "F", "type": "Dominant 7"}}]},
+        ]}
+        self.assertEqual([(s.symbol, s.beats) for s in StudioProgression.from_dict(old_vl).steps],
+                         [("Cm7", 4), ("Rest", 4), ("Rest", 2), ("F7", 2)])
+
+    def test_fill_stances_sounds_every_chord_and_keeps_pins(self):
+        from core.progression_studio import cadence_progression, fill_stances, parse_progression_text
+
+        for build in E9_NECKS + C6_NECKS:
+            neck = build()
+            for steps in (cadence_progression("blues12", "G").steps, cadence_progression("major_251", "F").steps,
+                          parse_progression_text("G Em C D7 - G", 4)):
+                unsolved = fill_stances(neck, steps, VoiceLeadingConstraints(0, 12, 3, "minimal", 3))
+                for i, s in enumerate(steps):
+                    if s.is_rest or i in unsolved:
+                        continue
+                    self.assertTrue(grip_matches_chord(neck, s.fret, s.controllers, s.grip, s.root, s.chord_type,
+                                                       require_root=False), (neck.name, s.symbol, s.fret, s.controllers))
+                    self.assertFalse(s.pinned)
+
+        neck = presets.build_standard_emmons_e9_10()
+        steps = parse_progression_text("G C D G", 4)
+        steps[1].set_stance(3, ["P1", "P2"], [8, 6, 5], pinned=True)  # C at fret 3 with A+B
+        fill_stances(neck, steps, VoiceLeadingConstraints(0, 12, 3, "up", 0))
+        self.assertEqual((steps[1].fret, steps[1].controllers, steps[1].pinned), (3, ["P1", "P2"], True))
+        self.assertTrue(all(s.has_stance for s in steps))
+        # A different chord clears a stance (it can never be replayed for the wrong chord); the same keeps it.
+        steps[1].set_chord("C", "Major")
+        self.assertTrue(steps[1].has_stance)
+        steps[1].set_chord("A", "Minor")
+        self.assertFalse(steps[1].has_stance or steps[1].pinned)
+
+    def test_identify_grip_and_presets(self):
+        from core.progression_studio import identify_grip_chord, preset_progression
+        from core.progression_presets import PROGRESSION_PRESETS
+
+        e9 = presets.build_standard_emmons_e9_10()
+        self.assertEqual(identify_grip_chord(e9, 3, [], [8, 6, 5]), ("G", "Major"))
+        self.assertEqual(identify_grip_chord(e9, 3, ["P1", "P2"], [8, 6, 5]), ("C", "Major"))
+        self.assertEqual(identify_grip_chord(e9, 3, [], [8, 6, 5], hint=("E", "Minor")), ("G", "Major"))  # hint must fit
+        self.assertIsNone(identify_grip_chord(e9, 3, [], [8, 6]))
+        for ctrl, grip, fret in (([], [8, 6, 5, 4], 3), (["P2"], [5, 4, 3], 7)):
+            chord = identify_grip_chord(e9, fret, ctrl, grip)
+            if chord:
+                self.assertTrue(grip_matches_chord(e9, fret, ctrl, grip, *chord, require_root=False))
+
+        be_c6 = presets.build_be_c6_5p_4kl()
+        for p in PROGRESSION_PRESETS:
+            neck = be_c6 if p.neck_type == "C6" else e9
+            prog = preset_progression(p, neck)
+            self.assertIsNotNone(prog, p.name)
+            for s in prog.steps:
+                self.assertTrue(s.pinned and s.has_stance)
+                self.assertTrue(set(s.controllers) <= set(neck.pedals) | set(neck.knee_levers))
+                if s.has_chord:
+                    self.assertTrue(grip_matches_chord(neck, s.fret, s.controllers, s.grip, s.root, s.chord_type,
+                                                       require_root=False), (p.name, s.symbol))
+
+    def test_playback_plan_and_tab(self):
+        from core.progression_studio import (
+            STYLE_ARPEGGIO, PlaybackPlan, StudioProgression, arpeggio_strings, parse_progression_text, tab_steps,
+        )
+        from core.stances import controller_display_names
+        from core.tab_generator import TabGenerator
+
+        prog = StudioProgression(steps=parse_progression_text("G C:2 D:2 G", 4))
+        plan = PlaybackPlan.build(prog, 0, 3, count_in_bars=1, loop=False)
+        events = [plan.at(k) for k in range(18)]
+        self.assertEqual([e.count_in for e in events[:5]], [True] * 4 + [False])
+        self.assertEqual([k for k, e in enumerate(events) if e.step is not None], [4, 8, 10, 12])
+        self.assertEqual([k for k, e in enumerate(events) if e.accent], [0, 4, 8, 12])
+        self.assertTrue(events[16].done and not events[15].done)
+        loop = PlaybackPlan.build(prog, 1, 2, count_in_bars=0, loop=True)  # C D, starting mid-song
+        self.assertEqual([loop.at(k).step for k in range(6)], [1, None, 2, None, 1, None])
+        self.assertTrue(loop.at(0).accent and not loop.at(2).accent)  # C starts bar 2, D on beat 3
+
+        neck = presets.build_standard_emmons_e9_10()
+        prog.steps[0].set_stance(3, [], [8, 6, 5])
+        prog.steps[1].set_stance(3, ["P1", "P2"], [8, 6, 5])
+        prog.steps[1].style = STYLE_ARPEGGIO
+        self.assertEqual(len(arpeggio_strings(prog.steps[1])), 8)  # one 4-note cycle per beat
+        tabs = tab_steps(prog.steps, controller_display_names(neck))
+        self.assertEqual(len(tabs), 1 + 4)  # block G, then one arpeggio cycle (unvoiced steps skipped)
+        self.assertEqual([t.chord_label for t in tabs[:2]], ["G", "C"])
+        self.assertTrue(all(t.pick_finger for t in tabs[1:]))
+        text = TabGenerator.generate_ascii_tab(neck.string_count, tabs)
+        self.assertIn("A+B", text)
+
 
 class PracticeEngineTests(unittest.TestCase):
     def test_permutations_unique_and_thumb_on_bass(self):  # D-13, D-36

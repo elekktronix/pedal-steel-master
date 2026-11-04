@@ -252,7 +252,7 @@ class CircleOfFifthsWidget(QWidget):
         self.cb_lock_pocket.setChecked(True)
         top_bar.addWidget(self.cb_lock_pocket)
 
-        self.cb_auto_seq = QCheckBox("➕ Auto-Add to Sequencer")
+        self.cb_auto_seq = QCheckBox("➕ Auto-Add to Progression Studio")
         self.cb_auto_seq.setChecked(False)
         self.cb_auto_seq.setStyleSheet("color: #28a745; font-weight: bold;")
         top_bar.addWidget(self.cb_auto_seq)

@@ -212,6 +212,20 @@ class VoiceLeadingEngine:
                     if constraints.min_fret <= v.fret <= constraints.max_fret
                 ]
 
+            if not in_range and needs_omission:
+                # D-47: dropping the 5th can leave nothing (e.g. Gmaj7 on E9); try the full chord.
+                for awkward_ok in (False, True):
+                    full = VoicingSolver.find_all_voicings(
+                        neck=neck,
+                        root_name=root,
+                        chord_type=norm_type,
+                        max_fret=min(24, constraints.max_fret),
+                        filter_awkward=not awkward_ok,
+                    )
+                    in_range = [v for v in full if constraints.min_fret <= v.fret <= constraints.max_fret]
+                    if in_range:
+                        break
+
             candidates_per_step.append(in_range)
 
         # Chords without any candidate stay None in their own measure; the DP runs over the rest

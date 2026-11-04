@@ -280,13 +280,15 @@ class MidiAudioEngine:
         string_num: Optional[int] = None,
         velocity: int = 95,
         cents_offset: float = 0.0,
+        delay: float = 0.0,
     ):
-        """Plays one note on its string's channel (or the sequence channel if no string is given)."""
+        """Plays one note on its string's channel (or the sequence channel if no string is given),
+        `delay` seconds from now (queued on the scheduler, so spacing is exact)."""
         if not self._opened or pitch <= 0:
             return
         ch = channel_for_string(string_num) if string_num else SEQUENCE_CHANNEL
         bend = cents_to_bend(cents_offset) if self.use_compensated_temperament else 0
-        self._scheduler.schedule(0, lambda: self._strike(ch, pitch, velocity, bend))
+        self._scheduler.schedule(delay, lambda: self._strike(ch, pitch, velocity, bend))
 
     def play_pocket(
         self,
@@ -354,7 +356,7 @@ class MidiAudioEngine:
         self._scheduler.schedule(0, _start)
         return True
 
-    def play_click(self, accent: bool = False, sound: str = "Woodblock", velocity: int = 110):
+    def play_click(self, accent: bool = False, sound: str = "Woodblock", velocity: int = 110, delay: float = 0.0):
         """Metronome click on the GM percussion channel. It goes through the same scheduler as the
         notes, so a click and a note queued together sound together (unlike a sound-card sample)."""
         if not self._opened:
@@ -363,8 +365,8 @@ class MidiAudioEngine:
         note = hi if accent else lo
         vel = min(127, velocity + 15) if accent else velocity
         ch = PERCUSSION_CHANNEL
-        self._scheduler.schedule(0, lambda: self._send((0x90 | ch) | (note << 8) | (vel << 16)))
-        self._scheduler.schedule(0.08, lambda: self._send((0x80 | ch) | (note << 8)))
+        self._scheduler.schedule(delay, lambda: self._send((0x90 | ch) | (note << 8) | (vel << 16)))
+        self._scheduler.schedule(delay + 0.08, lambda: self._send((0x80 | ch) | (note << 8)))
 
     def play_scale_sequence(self, pitches: List[int], delay: float = 0.38, velocity: int = 95):
         """Plays notes one after another on the sequence channel, releasing each previous note."""

@@ -3,13 +3,13 @@
 **Severity:** **P0** = crash or user-data corruption · **P1** = wrong musical output or a broken feature · **P2** = latent, UX or code health.
 The IDs are stable. Reference them in commits ("fix D-07") and keep this file current. Fixed defects stay listed so their regression tests can be traced.
 
-**Status:** all baseline defects are fixed, plus D-34 to D-38, D-41 and D-42. Open: D-39, D-40.
+**Status:** all baseline defects are fixed, plus D-34 to D-38 and D-41 to D-47. Open: D-39, D-40.
 
 ## Open
 
 | ID | Sev | Location | Issue | Suggested fix |
 |---|---|---|---|---|
-| D-39 | P2 | `ui/copedant_editor_dialog.py`, `ui/voice_leader_dialog.py` | Light mode (E-13) only adapts *stylesheets*. Colors set through `QColor` (the editor's matrix header items) and the voice leader's always-light measure cards are not theme-aware. | Move them to stylesheets, or read colors from the active theme. |
+| D-39 | P2 | `ui/copedant_editor_dialog.py` | Light mode (E-13) only adapts *stylesheets*. Colors set through `QColor` (the editor's matrix header items) are not theme-aware. (The voice leader's always-light measure cards went away with that window in E-32.) | Move them to stylesheets, or read colors from the active theme. |
 | D-40 | P2 | `ui/themes.py` | A theme switch re-styles every widget (about 0.9 s with all pop-outs created). | Acceptable for a menu action. If it grows, cache the light QSS per original string. |
 
 ## Fixed
@@ -17,6 +17,11 @@ The IDs are stable. Reference them in commits ("fix D-07") and keep this file cu
 | ID | Sev | Original defect | Resolution | Tests |
 |---|---|---|---|---|
 | D-01 | P1 | Pocket pitches mapped to strings 1..n by list position; string 10 on MIDI drum channel 9; strings 11–12 shared channels; scale sequences never released notes. | `STRING_CHANNELS` (0–8, 10–14) + `SEQUENCE_CHANNEL` 15. `_play_pocket` passes `{string: midi}`. Node clicks and the permutation trainer send the string number. Sequences send note-offs. State is locked. | `AudioTests`, `MainWindowTests.test_play_pocket_uses_string_numbers` |
+| D-43 | P1 | Sequencer Play Loop only started a timer: the first chord came one full interval (≥ 1 s) after Play, from the step after the selected one; tempo was whole seconds (1–5 s), no click. | Replaced by the Progression Studio transport (E-32): beat 1 on the click of Play, BPM, count-in, MIDI click. | `test_studio_starts_on_beat_one_and_keeps_time`, `test_studio_count_in_loop_range_and_end` |
+| D-44 | P1 | Voice leader click off tempo: CoarseTimer measured 417–436 ms per 410 ms beat (+185 ms over 15 beats, so 146 BPM played ≈142), and the WAV click (QSoundEffect) used a different audio path than the MIDI chords. | PreciseTimer re-armed on an absolute beat grid (measured 408–411 ms, ~0 drift); click via `audio.play_click` on the MIDI scheduler. | `test_studio_starts_on_beat_one_and_keeps_time` (real-time grid check) |
+| D-45 | P1 | Voice leader never cleared `solved_voicings`: after a cadence, dice roll, file load, measure change or neck switch, Play used the previous progression's (or neck's) voicings. | Stances live on the steps; a chord change clears that step's stance, a neck change clears all and re-voices. | `test_fill_stances_sounds_every_chord_and_keeps_pins`, `test_studio_editing_capture_neck_switch_and_files` |
+| D-46 | P2 | Voice leader chord tags (`'Minor' in type` → "m7", so Cm showed as Cm7; "Hal"; chips "C Min"); "Gen Tab" sent the path to the sequencer instead of making tab; Load CP = Import CP; dead "4/4" button; only one chord per bar played. | Symbols from `CHORD_SYMBOL_SUFFIX`; real Tab button; one Load menu; working time signature; per-step beats (several chords per bar). | `test_chord_text`, `test_playback_plan_and_tab` |
+| D-47 | P1 | `VoiceLeadingEngine` always dropped the 5th of 7th/9th/dim chords and never retried, so some chords had no voicing at all (Gmaj7 on E9). | Falls back to the full chord when the no-5th search is empty; every chord type on G is now voiced on all five factory necks. | `test_seventh_chords_fall_back_to_the_full_chord` |
 | D-02 | P0 | Loading a profile overwrote the factory neck slot; edits never went back to the profile. | `Neck.source_profile`; a profile opens as its own linked neck entry; editor Apply writes back. | `test_core_integrity` |
 | D-03 | P1 | Programmatic stance changes didn't update `LeverTogglePanel` state or the badge, so the next click emitted a stale set. | `MainWindow.apply_stance()` + `LeverTogglePanel.set_active_controllers()` replace 7 duplicated handlers. | `test_apply_stance_syncs_lever_panel` |
 | D-04 | P1 | Voice-leader "apply" used `setChecked` on non-checkable buttons. | New `VoiceLeaderDialog.voicing_applied` signal → `apply_stance`. | (through D-03 path) |

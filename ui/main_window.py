@@ -44,7 +44,7 @@ from ui.harmonic_target_panel import HarmonicTargetPanel
 from ui.lever_panel import LeverTogglePanel
 from ui.main_menu_builder import MainMenuBuilder
 from ui.manage_profiles_dialog import ProfileManagerDialog
-from ui.progression_panel import ProgressionSequencerWidget
+from ui.progression_studio_widget import ProgressionStudioWidget
 from ui.relative_moves_widget import RelativeMovesWidget
 from ui.scale_finder_widget import ScaleFinderWidget
 from ui.stance_chord_inspector_dialog import StanceChordInspectorDialog
@@ -91,11 +91,10 @@ class MainWindow(QMainWindow):
             migrate_half_stop_tokens(neck)
 
         self.current_neck_idx: int = 0
-        self.voice_leader_dlg = None
         self.stance_inspector_dlg = None
 
         self._init_ui()
-        self._init_sequencer_dock()
+        self._init_studio_dock()
         self._init_popout_windows()
         MainMenuBuilder.build_menubar(self)
         self._apply_theme(self.settings.get("theme", "dark"))
@@ -118,7 +117,8 @@ class MainWindow(QMainWindow):
             "target_root": self.harmonic_panel.get_root(),
             "target_chord": self.harmonic_panel.get_chord_type(),
             "display_mode": self.canvas.display_mode,
-            "sequencer_visible": self.dock_sequencer.isVisible(),
+            "studio_visible": self.dock_studio.isVisible(),
+            "studio": self.studio.session_data(),
             "geometry": bytes(self.saveGeometry().toBase64()).decode("ascii"),
             "window_state": bytes(self.saveState().toBase64()).decode("ascii"),
         }
@@ -160,8 +160,11 @@ class MainWindow(QMainWindow):
                 self.restoreGeometry(QByteArray.fromBase64(session["geometry"].encode("ascii")))
             if session.get("window_state"):
                 self.restoreState(QByteArray.fromBase64(session["window_state"].encode("ascii")))
-            if "sequencer_visible" in session:
-                self.dock_sequencer.setVisible(bool(session["sequencer_visible"]))
+            if isinstance(session.get("studio"), dict):
+                self.studio.restore_session(session["studio"])
+            visible = session.get("studio_visible", session.get("sequencer_visible"))
+            if visible is not None:
+                self.dock_studio.setVisible(bool(visible))
         except Exception:
             log.exception("Could not restore the previous session")
 
@@ -210,12 +213,13 @@ class MainWindow(QMainWindow):
         row1_bar.addWidget(self.btn_toggle_nns)
 
         row1_bar.addSpacing(6)
-        self.btn_toggle_seq = QPushButton("🎼 Sequencer")
-        self.btn_toggle_seq.setCheckable(True)
-        self.btn_toggle_seq.setChecked(False)
-        self.btn_toggle_seq.setStyleSheet("padding: 4px 12px; font-weight: bold;")
-        self.btn_toggle_seq.clicked.connect(self._toggle_sequencer_visibility)
-        row1_bar.addWidget(self.btn_toggle_seq)
+        self.btn_toggle_studio = QPushButton("🎼 Progression Studio")
+        self.btn_toggle_studio.setCheckable(True)
+        self.btn_toggle_studio.setChecked(False)
+        self.btn_toggle_studio.setToolTip("Chords, voice leading, playback with click, and tab (E-32)")
+        self.btn_toggle_studio.setStyleSheet("padding: 4px 12px; font-weight: bold;")
+        self.btn_toggle_studio.clicked.connect(self._toggle_studio_visibility)
+        row1_bar.addWidget(self.btn_toggle_studio)
         root_layout.addLayout(row1_bar)
 
         # 2. Row 2: Standardized Theory Tools & Method Drill Ribbons
@@ -280,11 +284,6 @@ class MainWindow(QMainWindow):
         self.btn_pop_circle.setStyleSheet(tool_btn_style)
         self.btn_pop_circle.clicked.connect(self._toggle_circle_popout)
         row2_bar.addWidget(self.btn_pop_circle)
-
-        self.btn_voice_leader = QPushButton("🧭 Voice Leader")
-        self.btn_voice_leader.setStyleSheet(tool_btn_style)
-        self.btn_voice_leader.clicked.connect(self._open_voice_leader)
-        row2_bar.addWidget(self.btn_voice_leader)
 
         row2_bar.addSpacing(10)
         sep = QFrame()
@@ -641,35 +640,67 @@ class MainWindow(QMainWindow):
         self._swell_sounding_strings()
         self._refresh_stance_dependents()
 
-    def _init_sequencer_dock(self):
-        self.dock_sequencer = QDockWidget("Progression Sequencer & Tablature", self)
-        self.dock_sequencer.setObjectName("dock_sequencer")  # required by saveState/restoreState
-        self.dock_sequencer.setAllowedAreas(Qt.RightDockWidgetArea | Qt.LeftDockWidgetArea)
+    def _init_studio_dock(self):
+        """E-32: the Progression Studio replaces the Voice Leader window and the Sequencer dock."""
+        self.dock_studio = QDockWidget("Progression Studio", self)
+        # A new object name, so an old saved window state doesn't squeeze it into the side area.
+        self.dock_studio.setObjectName("dock_progression_studio")
+        self.dock_studio.setAllowedAreas(Qt.AllDockWidgetAreas)
 
-        self.sequencer = ProgressionSequencerWidget(self)
-        self.sequencer.btn_capture.clicked.connect(self._capture_active_step)
-        self.sequencer.step_activated.connect(self._apply_sequencer_step)
+        self.studio = ProgressionStudioWidget(
+            self.guitar.necks[self.current_neck_idx], settings=self.settings, save_settings=save_settings, parent=self
+        )
+        self.studio.stance_requested.connect(
+            lambda fret, ctrls, grip, banner: self.apply_stance(fret, ctrls, grip, play=False, banner=banner)
+        )
+        self.studio.play_step_requested.connect(self._play_studio_step)
+        self.studio.click_requested.connect(lambda accent, sound: self.audio.play_click(accent=accent, sound=sound))
+        self.studio.silence_requested.connect(self.audio.silence_all)
+        self.studio.capture_requested.connect(self._capture_into_studio)
 
-        self.dock_sequencer.setWidget(self.sequencer)
-        self.addDockWidget(Qt.RightDockWidgetArea, self.dock_sequencer)
-        self.dock_sequencer.hide()
-        self.dock_sequencer.visibilityChanged.connect(self._on_dock_visibility_changed)
+        self.dock_studio.setWidget(self.studio)
+        self.addDockWidget(Qt.BottomDockWidgetArea, self.dock_studio)
+        self.dock_studio.hide()
+        self.dock_studio.visibilityChanged.connect(self._on_dock_visibility_changed)
 
-    def _toggle_sequencer_visibility(self):
-        is_vis = self.dock_sequencer.isVisible()
-        self.dock_sequencer.setVisible(not is_vis)
+    def _toggle_studio_visibility(self):
+        is_vis = self.dock_studio.isVisible()
+        self.dock_studio.setVisible(not is_vis)
         if not is_vis:
-            self.dock_sequencer.raise_()
+            self.dock_studio.raise_()
 
-    def _pop_out_sequencer(self):
-        self.dock_sequencer.setFloating(True)
-        self.dock_sequencer.show()
-        self.dock_sequencer.raise_()
+    def _pop_out_studio(self):
+        self.dock_studio.setFloating(True)
+        self.dock_studio.show()
+        self.dock_studio.raise_()
 
     def _on_dock_visibility_changed(self, visible: bool):
-        self.btn_toggle_seq.blockSignals(True)
-        self.btn_toggle_seq.setChecked(visible)
-        self.btn_toggle_seq.blockSignals(False)
+        self.btn_toggle_studio.blockSignals(True)
+        self.btn_toggle_studio.setChecked(visible)
+        self.btn_toggle_studio.blockSignals(False)
+
+    def _play_studio_step(self, style: str, strings: list, seconds_between: float):
+        """Sounds the stance the studio just applied: block, roll, or an arpeggio whose notes are queued
+        on the MIDI scheduler with exact spacing (each on its own string's channel)."""
+        if style == "arpeggio":
+            states = {st.string_number: st for st in self.canvas.active_states}
+            cents = self._current_cents(set(strings))
+            for i, s_num in enumerate(strings):
+                st = states.get(s_num)
+                if st is not None:
+                    self.audio.play_note(st.active_midi, s_num, cents_offset=cents.get(s_num, 0.0),
+                                         delay=i * seconds_between)
+        else:
+            self._play_pocket(roll=(style == "roll"))
+
+    def _capture_into_studio(self, replace: bool):
+        from core.progression_studio import identify_grip_chord
+        neck = self.guitar.necks[self.current_neck_idx]
+        fret, ctrls, grip = self.canvas.bar_fret, set(self.canvas.engaged_levers), set(self.canvas.active_pocket)
+        root, ctype = self.harmonic_panel.get_root(), self.harmonic_panel.get_chord_type()
+        hint = (root, ctype) if root and root != "None" and ctype else None
+        chord = identify_grip_chord(neck, fret, ctrls, grip, hint=hint) if grip else None
+        self.studio.add_captured_step(fret, ctrls, grip, chord, replace=replace)
 
     def _arpeggiate_active_pocket(self):
         if not self.canvas.active_states or not self.canvas.active_pocket:
@@ -729,11 +760,8 @@ class MainWindow(QMainWindow):
             self.scale_finder.update_neck(neck)
         if hasattr(self, "circle_widget"):
             self.circle_widget.update_neck(neck)
-        if hasattr(self, "sequencer"):
-            self.sequencer.set_neck(neck)
-            self.sequencer.set_neck_type("C6" if is_c6 else "E9")
-        if hasattr(self, "voice_leader_dlg") and self.voice_leader_dlg is not None:
-            self.voice_leader_dlg.set_neck(neck)
+        if hasattr(self, "studio"):
+            self.studio.set_neck(neck)
 
         self.harmonic_panel._on_change()
         self._update_star_map_ribbon()
@@ -1020,15 +1048,9 @@ class MainWindow(QMainWindow):
 
         self.apply_stance(chosen_match.fret, chosen_match.engaged_levers, chosen_match.grip_strings)
 
-        if add_to_sequencer:
-            chord_tag = f"{root} {chord_type[:3]}"
-            self.sequencer.string_count = neck.string_count
-            self.sequencer.capture_step(
-                fret=chosen_match.fret,
-                levers=set(chosen_match.engaged_levers),
-                grip=set(chosen_match.grip_strings),
-                chord_label=chord_tag,
-            )
+        if add_to_sequencer:  # "Auto-add to Progression Studio"
+            self.studio.add_chord_step(root, chord_type, chosen_match.fret,
+                                       chosen_match.engaged_levers, chosen_match.grip_strings)
 
     def _current_cents(self, strings) -> dict:
         """Newman compensated-tuning cents for the current stance (empty unless enabled and E9)."""
@@ -1049,9 +1071,6 @@ class MainWindow(QMainWindow):
         self.audio.play_pocket(pitches, roll=roll, cents=self._current_cents(pitches.keys()))
         self._sounding = dict(pitches)
         self._sounding_until = time.monotonic() + self.SWELL_WINDOW_SEC
-
-    def _apply_solved_voicing(self, fret: int, levers: list, grip_strings: list):
-        self.apply_stance(fret, levers, grip_strings)
 
     def _export_pdf(self):
         neck = self.guitar.necks[self.current_neck_idx]
@@ -1086,24 +1105,6 @@ class MainWindow(QMainWindow):
             clipboard.setPixmap(pixmap)
             QMessageBox.information(self, "Snapshot Copied", "Fretboard image copied to clipboard.")
 
-    def _capture_active_step(self):
-        chord_tag = self.canvas.detected_chord_label
-        if not chord_tag:
-            root = self.harmonic_panel.get_root()
-            chord = self.harmonic_panel.get_chord_type()
-            chord_tag = f"{root}{chord[:3]}" if root != "None" else "Grip"
-
-        self.sequencer.string_count = self.guitar.necks[self.current_neck_idx].string_count
-        self.sequencer.capture_step(
-            fret=self.canvas.bar_fret,
-            levers=self.canvas.engaged_levers,
-            grip=self.canvas.active_pocket,
-            chord_label=chord_tag,
-        )
-
-    def _apply_sequencer_step(self, fret: int, levers: list, grip_strings: set):
-        self.apply_stance(fret, levers, grip_strings)
-
     def _toggle_scale_box_menu_preference(self):
         show = self.action_scale_box.isChecked()
         self.settings["show_scale_box"] = show
@@ -1118,41 +1119,6 @@ class MainWindow(QMainWindow):
             self.action_scale_box.blockSignals(True)
             self.action_scale_box.setChecked(checked)
             self.action_scale_box.blockSignals(False)
-
-    def _open_voice_leader(self):
-        from ui.voice_leader_dialog import VoiceLeaderDialog
-        neck = self.guitar.necks[self.current_neck_idx]
-        if self.voice_leader_dlg is None:
-            self.voice_leader_dlg = VoiceLeaderDialog(neck=neck, parent=self)
-            self.voice_leader_dlg.setWindowFlags(Qt.Window)
-            self.voice_leader_dlg.voicing_path_applied.connect(self._apply_voice_leader_path)
-            self.voice_leader_dlg.voicing_applied.connect(self._apply_solved_voicing)
-
-        if hasattr(self.voice_leader_dlg, "set_neck"):
-            self.voice_leader_dlg.set_neck(neck)
-        else:
-            self.voice_leader_dlg.neck = neck
-
-        self.voice_leader_dlg.show()
-        self.voice_leader_dlg.raise_()
-        self.voice_leader_dlg.activateWindow()
-
-    def _apply_voice_leader_path(self, solved_steps: list):
-        neck = self.guitar.necks[self.current_neck_idx]
-        self.sequencer.set_neck(neck)
-        self.sequencer._clear_all()
-
-        for m_idx, v in solved_steps:
-            self.sequencer.capture_step(
-                fret=v.fret,
-                levers=set(v.engaged_levers),
-                grip=set(v.grip_strings),
-                chord_label=f"M{m_idx + 1}",
-            )
-
-        if solved_steps:
-            first_v = solved_steps[0][1]
-            self.apply_stance(first_v.fret, first_v.engaged_levers, first_v.grip_strings, play=False)
 
     def _open_star_map_dialog(self):
         from ui.star_map_widget import StarMapWidget
@@ -1518,8 +1484,7 @@ class MainWindow(QMainWindow):
             self.scale_finder.close()
         if hasattr(self, "circle_widget"):
             self.circle_widget.close()
-        if self.voice_leader_dlg:
-            self.voice_leader_dlg.close()
+        self.studio.stop()
         if self.stance_inspector_dlg:
             self.stance_inspector_dlg.close()
         self.audio.close()
