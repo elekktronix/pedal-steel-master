@@ -3,7 +3,7 @@
 PySide6 desktop app (Windows-first) that visualizes pedal steel copedants, resolves the sounding pitch for any bar/pedal/lever stance, and runs chord, scale and voice-leading engines on top of that.
 
 - Run: `.venv\Scripts\python.exe main.py`
-- Tests: `.venv\Scripts\python.exe -m unittest discover -s tests -v` (stdlib `unittest`; pytest is not installed)
+- Tests: `.venv\Scripts\python.exe -m unittest discover -s tests -v` (stdlib `unittest`; pytest is not installed). The suite takes about 40 s. **Always run it with a timeout**, e.g. via `-X faulthandler` and `faulthandler.dump_traceback_later(220, exit=True)`, so a hang prints a stack instead of blocking.
 
 ## Read the architecture docs on demand, not up front
 
@@ -31,6 +31,8 @@ The docs in `docs/architecture/` are split so you only load what the task needs.
 - **Verify musically.** Any change to pitch logic, presets or landmarks must be checked by resolving it through `FretboardResolver` (add or extend a test in `tests/`). Never trust a chord label without resolving it.
 - **No citation markers** (`[cite: N]`) or similar artifacts in source files.
 - **`core/` stays Qt-free.** Domain operations that mutate a `Neck` (renaming or renumbering controllers, migrations) belong in `core/`, not in dialogs.
+- **Qt tests must really delete the windows and dialogs they create** (`deleteLater()` followed by `QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)`, as in the `destroy_window` / `_delete_widget` helpers). Leftover widgets make every later app-stylesheet change slower, and they once made the suite take 160 s or time out.
+- Never create a second `ThemeManager`; use `ThemeManager.for_app(app)`.
 - Don't commit or push unless asked.
 
 ## Hard rules (summary; full list in 00-critical-rules.md)

@@ -241,7 +241,11 @@ class MainWindowTests(unittest.TestCase):
         self.w = MainWindow()
 
     def tearDown(self):
+        from PySide6.QtCore import QCoreApplication, QEvent
+
         self.w.close()
+        self.w.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)  # really free the window
         for p in reversed(self._patches):
             p.stop()
         self._tmp.cleanup()

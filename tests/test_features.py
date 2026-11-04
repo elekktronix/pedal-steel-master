@@ -22,6 +22,18 @@ from PySide6.QtWidgets import QApplication, QPushButton  # noqa: E402
 
 _APP = QApplication.instance() or QApplication([])
 
+
+def destroy_window(w) -> None:
+    """Closes a MainWindow and really deletes it (deleteLater needs an event loop to run)."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    try:
+        w.close()
+        w.deleteLater()
+    except RuntimeError:
+        return  # already deleted
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+
 from ui.themes import ThemeManager, to_light_stylesheet  # noqa: E402
 
 
@@ -174,7 +186,7 @@ class MainWindowFeatureTests(unittest.TestCase):
         from ui.main_window import MainWindow
 
         w = MainWindow()
-        self.addCleanup(w.deleteLater)
+        self.addCleanup(destroy_window, w)
         return w
 
     def test_session_round_trip(self):  # E-12
@@ -184,7 +196,7 @@ class MainWindowFeatureTests(unittest.TestCase):
         w.harmonic_panel.set_target("Bb", "Minor 7th")
         w.apply_stance(5, {"P6"}, {7, 6, 5, 4}, play=False)
         w._set_display_mode("notes")
-        w.close()
+        destroy_window(w)
 
         w2 = self._window()
         try:

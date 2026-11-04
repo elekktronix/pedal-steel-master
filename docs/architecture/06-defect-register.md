@@ -3,17 +3,15 @@
 **Severity:** **P0** = crash or user-data corruption · **P1** = wrong musical output or a broken feature · **P2** = latent, UX or code health.
 The IDs are stable. Reference them in commits ("fix D-07") and keep this file current. Fixed defects stay listed so their regression tests can be traced.
 
-**Status:** all 33 baseline defects (from `04557c1`) are fixed. The new open items are D-34 to D-38.
+**Status:** all baseline defects are fixed, plus D-34, D-35, D-37 and D-38. Open: D-36, D-39, D-40.
 
 ## Open
 
 | ID | Sev | Location | Issue | Suggested fix |
 |---|---|---|---|---|
-| D-34 | P2 | `core/pearls_engine.py` | Stances that don't touch the selected string pair (e.g. the F lever on strings 3 & 5) produce rows identical to the open row. | Skip stances whose controllers don't change either string. |
-| D-35 | P2 | `core/audio.py` | `glide_string_pitch` (pedal "swells") is still not wired to lever toggles. The thread-per-note design remains. | E-11. |
-| D-36 | P2 | `core/permutation_engine.py` | The 24 patterns are unique now, but neither the table nor the names have been checked against Franklin's book. The four replacements (18, 20, 21, 23) are placeholders. | Check against the source and correct the patterns and names. |
-| D-37 | P2 | `core/voicing_solver.py` | `get_c6_open_chords` and `get_newman_minor_anchors` are unused; the latter duplicates star-map logic. | Delete them, or route through `StarMapEngine`. |
-| D-38 | P2 | `core/profile_manager.py` | Different names can still sanitize to the same file name. Saves confirm before overwriting instead of preventing the collision. | Store the display name inside the JSON and use a slug plus counter for the file name. |
+| D-36 | P2 | `core/permutation_engine.py` | The 24 patterns are unique, but neither the table nor the names have been checked against Franklin's book. The replacements for 18, 20, 21 and 23 are placeholders. | Check against the source and correct the patterns and names. |
+| D-39 | P2 | `ui/copedant_editor_dialog.py`, `ui/voice_leader_dialog.py` | Light mode (E-13) only adapts *stylesheets*. Colors set through `QColor` (the editor's matrix header items) and the voice leader's always-light measure cards are not theme-aware. | Move them to stylesheets, or read colors from the active theme. |
+| D-40 | P2 | `ui/themes.py` | A theme switch re-styles every widget (about 0.9 s with all pop-outs created). | Acceptable for a menu action. If it grows, cache the light QSS per original string. |
 
 ## Fixed
 
@@ -52,3 +50,7 @@ The IDs are stable. Reference them in commits ("fix D-07") and keep this file cu
 | D-31 | P2 | Refresh fan-out; the scale solver resolved the neck per string; the circle widget re-searched on every lever change. | `apply_stance` batches refreshes; the scale solver caches per (fret, combo); the circle caches voicings per neck and window (≈460 ms → 6 ms per lever change). | timing check |
 | D-32 | P2 | Incomplete defaults; settings file tracked in the repo. | Complete `DEFAULT_SETTINGS`; settings saved to `~/.psg_visualizer/app_settings.json`; the repo file is read once as a legacy fallback and is now untracked and git-ignored. | — |
 | D-33 | P2 | No tests, `print`-only diagnostics, silent `except: pass`. | 41 `unittest` tests; `logging` to `~/.psg_visualizer/app.log` (configured in `main.py`); remaining silent excepts now log. | `tests/` |
+| D-34 | P2 | Pearls stances that don't touch the string pair duplicated the open row. | Such stances are skipped. | `PearlsTests` |
+| D-35 | P2 | `glide_string_pitch` was unused; one thread per note. | Single scheduler thread (E-11); pedal/bar swells wired to lever and fret changes. | `AudioSchedulerTests`, `test_lever_toggle_swells_ringing_strings` |
+| D-37 | P2 | Unused `get_c6_open_chords` / `get_newman_minor_anchors`. | Removed. | — |
+| D-38 | P2 | Names that sanitize to the same file were only confirmed, not prevented. | `ProfileManager.unique_profile_name` + `ui/profile_prompts.choose_profile_name`: Overwrite / Save as "Name 2" / Cancel. | `ProfileNamingTests` |

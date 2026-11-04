@@ -161,6 +161,16 @@ try:
     from PySide6.QtWidgets import QApplication, QMessageBox
 
     _APP = QApplication.instance() or QApplication([])
+
+    def _delete_widget(w) -> None:
+        """Really frees a dialog (deleteLater needs an event loop), so later tests stay fast."""
+        from PySide6.QtCore import QCoreApplication, QEvent
+
+        try:
+            w.deleteLater()
+        except RuntimeError:
+            return
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
     HAVE_QT = True
 except Exception:  # pragma: no cover
     HAVE_QT = False
@@ -171,7 +181,9 @@ class CopedantEditorTests(TempProfileDirMixin, unittest.TestCase):
     def _editor(self, guitar, idx):
         from ui.copedant_editor_dialog import CopedantEditorDialog
 
-        return CopedantEditorDialog(neck=guitar.necks[idx], guitar=guitar, current_neck_idx=idx)
+        dlg = CopedantEditorDialog(neck=guitar.necks[idx], guitar=guitar, current_neck_idx=idx)
+        self.addCleanup(_delete_widget, dlg)
+        return dlg
 
     def test_apply_on_be_e9_keeps_split_semantics(self):  # D-07
         guitar = presets.build_standard_d10_guitar()
@@ -248,6 +260,7 @@ class ProfileDialogTests(TempProfileDirMixin, unittest.TestCase):
         neck = presets.build_standard_emmons_e9_10()
         before = neck.to_dict()
         dlg = ProfileManagerDialog(current_neck=neck)
+        self.addCleanup(_delete_widget, dlg)
         dlg.txt_profile_name.setText("My E9")
         with mock.patch.object(QMessageBox, "information"):
             dlg._save_profile()

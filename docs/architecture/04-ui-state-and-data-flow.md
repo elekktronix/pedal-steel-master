@@ -68,6 +68,15 @@ Controllers may include `"<ID>_HALF"` (button state 1). IDs the neck doesn't hav
 ### 6. Copedant editor (modal)
 The editor keeps `_working: {neck_idx: deepcopy}`, so switching necks in its combo keeps unapplied edits (`_sync_ui_to_neck`). Opening a neck runs `migrate_legacy_ids` and `migrate_half_stop_tokens`. Matrix edits mutate the working copy immediately. Split and half-stop rows live as table widgets until flushed. Dropdowns keep unknown values as "⚠ X (undefined)" and never fall back to the first item. The Franklin toggle and insert go through `shift_pedal_ids`. Apply commits all working copies, writes profile files only for linked necks, persists the active setup and accepts. **Duplicate** and **Save as Profile** (into a new name) append a linked neck immediately and set `guitar_changed`.
 
+### 7. Session restore (E-12)
+At the end of `MainWindow.__init__`, `_restore_session(load_session())` runs. It restores the neck (matched by name first, then index), the harmonic target, the display mode, the stance (through `apply_stance(play=False)`), window geometry and dock state, and sequencer visibility. `closeEvent` saves `_capture_session()` first. Invalid entries are skipped. The sequencer dock needs `objectName` for `restoreState`.
+
+### 8. Pedal/bar swells (E-11)
+`_play_pocket` remembers `{string: struck midi}` for `SWELL_WINDOW_SEC` (4 s). On a **manual** lever toggle (`_on_levers_changed`) or bar move (`_on_bar_fret_changed` outside a batch), `_swell_sounding_strings()` bends each ringing string to its new pitch with `audio.glide_string_pitch`. Targets beyond ±2 semitones re-strike the string softly (velocity 60). This is controlled by the "Pedal & Bar Swells" preference (`settings["pedal_swells"]`). `apply_stance` never glides; it re-plucks.
+
+### 9. Theme (E-13)
+`_apply_theme` sets the app QSS (`DARK_THEME_QSS`/`LIGHT_THEME_QSS`), then `ThemeManager.for_app(app).set_dark(...)`, the canvas and the circle widget. **There is exactly one `ThemeManager` per application (`for_app`); two would fight over the same widgets forever.** In light mode, every inline stylesheet is rewritten as it's set: `StyleChange` and `Polish` events are queued and processed iteratively, never re-entrantly. The dark original is kept in a widget property and restored on switching back. Inline styles can therefore stay written in dark-mode colors.
+
 ## Signal catalogue (live)
 
 | Emitter.signal | Args | Handler |

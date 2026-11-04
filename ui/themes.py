@@ -247,7 +247,7 @@ def light_background(token: str) -> str:
 
 
 def dark_foreground(token: str) -> str:
-    """Light/mid text (lightness > 0.5) -> dark text with the same hue (lightness 0.15..0.35)."""
+    """Light/mid text (lightness > 0.45) -> dark text with the same hue (lightness 0.15..0.37)."""
     h, l, s = colorsys.rgb_to_hls(*_to_rgb(token))
     return _to_hex(colorsys.hls_to_rgb(h, 0.15 + (1.0 - l) * 0.4, s))
 
@@ -267,7 +267,7 @@ def _remap_block(body: str) -> str:
         if prop in _BG_PROPS:
             val = re.sub(_COLOR_RE, lambda c: light_background(c.group(0)) if _lightness(c.group(0)) < 0.35 else c.group(0), val)
         elif bg_is_dark_or_absent:
-            val = re.sub(_COLOR_RE, lambda c: dark_foreground(c.group(0)) if _lightness(c.group(0)) > 0.5 else c.group(0), val)
+            val = re.sub(_COLOR_RE, lambda c: dark_foreground(c.group(0)) if _lightness(c.group(0)) > 0.45 else c.group(0), val)
         return f"{m.group('prop')}{m.group('sep')}{val}"
 
     return _DECL_RE.sub(_decl, body)
@@ -303,20 +303,21 @@ class ThemeManager(QObject):
         # Changing a stylesheet sends StyleChange to the widget AND all its descendants. Handling
         # those re-entrantly nests handlers per tree level, so widgets are queued and processed
         # iteratively instead.
-        self._pending: list = []
+        self._pending: dict = {}  # id(widget) -> widget; de-duplicated work queue
         self._busy = False
         app.installEventFilter(self)
 
     def set_dark(self, is_dark: bool):
         self.is_dark = is_dark
-        self._pending.extend(self.app.allWidgets())
+        for w in self.app.allWidgets():
+            self._pending[id(w)] = w
         self._drain()
 
     def eventFilter(self, obj, event):
         # StyleChange: a stylesheet was set. Polish: sent before a widget is first shown; needed
         # because Qt skips StyleChange for repeated setStyleSheet calls on never-shown widgets.
         if event.type() in (QEvent.StyleChange, QEvent.Polish) and isinstance(obj, QWidget):
-            self._pending.append(obj)
+            self._pending[id(obj)] = obj
             if not self._busy:
                 self._drain()
         return False
@@ -325,7 +326,7 @@ class ThemeManager(QObject):
         self._busy = True
         try:
             while self._pending:
-                w = self._pending.pop()
+                _, w = self._pending.popitem()
                 try:
                     self._apply(w)
                 except RuntimeError:

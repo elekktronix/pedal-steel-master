@@ -2,7 +2,7 @@
 
 The order is chosen so each step makes the next one safer. Steps 1–3 also stop future AI edits from silently breaking the music logic.
 
-**Progress (2026-11-03):** E-01 partially done: tests exist and all presets and landmarks are verified; there's no runtime `validate_neck` panel yet. E-02, E-03 and E-06 are done (`core/stances.py` roles). E-07 is done for the star map, Franklin hub, Warnock/Barndo moves, pearls and progression presets. E-15 is done except for ruff and pre-commit. E-16 is partly done (caching and batching; no resolver memoization or worker threads).
+**Progress (2026-11-03):** E-01 partially done: tests exist and all presets and landmarks are verified; there's no runtime `validate_neck` panel yet. E-02, E-03 and E-06 are done (`core/stances.py` roles). E-07 is done for the star map, Franklin hub, Warnock/Barndo moves, pearls and progression presets. E-15 is done except for ruff and pre-commit. E-16 is partly done (caching and batching; no resolver memoization or worker threads). **E-11 (audio scheduler + swells), E-12 (session) and E-13 (light theme via `ThemeManager`) are done**; see D-39 for the light-mode gaps.
 
 ## Phase 1 — Safety net (do first)
 
