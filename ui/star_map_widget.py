@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.star_map_engine import StarMapEngine, StarMapLandmark
-from core.theory import NOTE_NAMES_SHARP
+from core.theory import note_names, respell
 
 
 class StarMapWidget(QDialog):
@@ -43,8 +43,8 @@ class StarMapWidget(QDialog):
         top_h = QHBoxLayout()
         top_h.addWidget(QLabel("<b>Chord Key:</b>"))
         self.combo_root = QComboBox()
-        self.combo_root.addItems(NOTE_NAMES_SHARP)
-        self.combo_root.setCurrentText(self.current_root)
+        self.combo_root.addItems(note_names())
+        self.combo_root.setCurrentText(respell(self.current_root))
         self.combo_root.currentIndexChanged.connect(self._on_root_changed)
         top_h.addWidget(self.combo_root)
         top_h.addStretch()

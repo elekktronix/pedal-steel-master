@@ -43,6 +43,23 @@ class RoleTests(unittest.TestCase):
         be_c6 = detect_roles(presets.build_be_c6_5p_4kl())
         self.assertEqual((be_c6["C6P6"], be_c6["C6P8"]), ("P3", "P5"))  # IDs P1-P5 labelled P4-P8
 
+    def test_franklin_pedal_chords(self):  # Franklin, "Intervals" p. 12: open-position pedal/lever chords
+        from core.chord_identifier import FRANKLIN_GROUPS
+        from core.stances import resolve_stance
+
+        claims = [((), "E", "Major", (1, 2, 3, 4)), (("A",), "C#", "Minor", (1, 2, 3, 4)),
+                  (("B",), "E", "Sus4", (1, 2, 3, 4)), (("A", "B"), "A", "Major", (1, 2, 3, 4)),
+                  (("B", "C"), "F#", "Minor", (1, 2)), (("F",), "F", "Diminished", (1, 2, 3, 4)),
+                  (("D",), "G#", "Minor", (1, 2, 3, 4))]
+        for build in E9_NECKS[:2]:  # the book's string groups use 10-string numbering
+            neck = build()
+            for tokens, root, chord, groups in claims:
+                ids = set(resolve_stance(neck, list(tokens)))
+                for strings, group in FRANKLIN_GROUPS.items():
+                    expected = int(group.split()[-1]) in groups
+                    ok = grip_matches_chord(neck, 0, ids, set(strings), root, chord, require_root=False)
+                    self.assertEqual(ok, expected, f"{neck.name}: {tokens} {group} {root} {chord}")
+
 
 class ContentCorrectnessTests(unittest.TestCase):
     def test_progression_presets_sound_their_labels(self):  # D-10
@@ -161,12 +178,31 @@ class VoiceLeaderTests(unittest.TestCase):
 
 
 class PracticeEngineTests(unittest.TestCase):
-    def test_permutations_unique_and_thumb_on_bass(self):  # D-13
-        patterns = [v[2] for v in FRANKLIN_24_PERMUTATIONS.values()]
-        self.assertEqual(len(set(patterns)), 24)
-        events = PermutationEngine.generate_sequence(2, [8, 6, 5, 4], cycles=1)  # T-I-M-T
-        self.assertEqual([(e.finger, e.string_number) for e in events], [("T", 8), ("I", 5), ("M", 4), ("T", 8)])
+    def test_permutations_unique_and_thumb_on_bass(self):  # D-13, D-36
+        orders = [v[3] for v in FRANKLIN_24_PERMUTATIONS.values()]
+        self.assertEqual(len(set(orders)), 24)
+        self.assertTrue(all(sorted(o) == [0, 1, 2, 3] for o in orders))  # every string once
+        events = PermutationEngine.generate_sequence(2, [8, 6, 5, 4], cycles=1)  # #2: T-I-M-T
+        self.assertEqual([(e.finger, e.string_number) for e in events], [("T", 6), ("I", 5), ("M", 4), ("T", 8)])
         self.assertEqual(PermutationEngine.generate_sequence(2, [], cycles=1), [])
+
+    def test_permutations_match_franklin_chart(self):  # D-36: Intervals p. 38, open E9 strings 8-7-6-5
+        from core.resolver import FretboardResolver
+
+        chart = {
+            1: "E F# G# B", 2: "F# G# B E", 3: "G# B E F#", 4: "B E F# G#", 5: "B G# F# E", 6: "G# F# E B",
+            7: "F# E B G#", 8: "E B G# F#", 9: "B F# G# E", 10: "F# G# E B", 11: "G# E B F#", 12: "E B F# G#",
+            13: "F# B E G#", 14: "B E G# F#", 15: "E G# F# B", 16: "G# F# B E", 17: "B G# E F#", 18: "G# E F# B",
+            19: "E F# B G#", 20: "F# B G# E", 21: "E G# B F#", 22: "G# B F# E", 23: "B F# E G#", 24: "F# E G# B",
+        }
+        neck = presets.build_standard_emmons_e9_10()
+        names = {s.string_number: s.active_note_name.rstrip("0123456789")
+                 for s in FretboardResolver.resolve_neck_state(neck, 0, set())}
+        for pid, notes in chart.items():
+            events = PermutationEngine.generate_sequence(pid, [5, 6, 7, 8], cycles=1)
+            self.assertEqual(" ".join(names[e.string_number] for e in events), notes, f"permutation #{pid}")
+        fingers = {pid: "".join(v[2]) for pid, v in FRANKLIN_24_PERMUTATIONS.items()}
+        self.assertEqual((fingers[18], fingers[20], fingers[21], fingers[23]), ("MTIM", "TMIT", "TIMT", "MITM"))
 
     def test_tab_columns_align(self):  # D-16
         txt = TabGenerator.generate_ascii_tab(10, [TabStep(3, [], {8, 6, 5}, "G"), TabStep(12, ["P1"], {8}, "C")])
@@ -265,11 +301,21 @@ class MainWindowTests(unittest.TestCase):
         w.apply_stance(0, {"LKL", "LKR"}, play=False)
         self.assertIn("Left knee clash", w.lever_panel.lbl_feasibility_badge.text())
 
-    def test_flat_root_in_up_neck_dropdown_sticks(self):  # D-05
+    def test_flat_root_in_up_neck_dropdown_sticks(self):  # D-05 (spelling follows Preferences > Note Spelling)
+        from core.theory import set_accidental_preference
+
         w = self.w
+        self.addCleanup(set_accidental_preference, "sharps")
+        with mock.patch("ui.main_window.save_settings"):
+            w._set_note_spelling("flats")
         idx = w.combo_up_neck_chord.findText("Bb Major")
+        self.assertGreaterEqual(idx, 0)
         w.combo_up_neck_chord.setCurrentIndex(idx)
         self.assertEqual(w.combo_up_neck_chord.currentText(), "Bb Major")
+        self.assertEqual(w.harmonic_panel.get_root(), "Bb")
+        with mock.patch("ui.main_window.save_settings"):
+            w._set_note_spelling("sharps")
+        self.assertEqual(w.combo_up_neck_chord.currentText(), "A# Major")  # selection kept, respelled
         self.assertEqual(w.harmonic_panel.get_root(), "A#")
 
     def test_none_root_clears_analysis(self):  # D-27

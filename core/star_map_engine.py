@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Set, Tuple
 
 from core.models import Neck
 from core.stances import detect_roles, grip_matches_chord, is_c6_neck, resolve_stance
-from core.theory import NOTE_TO_SEMITONE
+from core.theory import NOTE_TO_SEMITONE, respell
 
 ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
     "A#": "Bb",
@@ -20,7 +20,7 @@ ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
 
 
 def format_root(name: str) -> str:
-    return ENHARMONIC_FLAT_NAMES.get(name, name)
+    return respell(name)  # global sharps/flats preference
 
 
 @dataclass

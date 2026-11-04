@@ -3,13 +3,12 @@
 **Severity:** **P0** = crash or user-data corruption · **P1** = wrong musical output or a broken feature · **P2** = latent, UX or code health.
 The IDs are stable. Reference them in commits ("fix D-07") and keep this file current. Fixed defects stay listed so their regression tests can be traced.
 
-**Status:** all baseline defects are fixed, plus D-34, D-35, D-37 and D-38. Open: D-36, D-39, D-40.
+**Status:** all baseline defects are fixed, plus D-34 to D-38, D-41 and D-42. Open: D-39, D-40.
 
 ## Open
 
 | ID | Sev | Location | Issue | Suggested fix |
 |---|---|---|---|---|
-| D-36 | P2 | `core/permutation_engine.py` | The 24 patterns are unique, but neither the table nor the names have been checked against Franklin's book. The replacements for 18, 20, 21 and 23 are placeholders. | Check against the source and correct the patterns and names. |
 | D-39 | P2 | `ui/copedant_editor_dialog.py`, `ui/voice_leader_dialog.py` | Light mode (E-13) only adapts *stylesheets*. Colors set through `QColor` (the editor's matrix header items) and the voice leader's always-light measure cards are not theme-aware. | Move them to stylesheets, or read colors from the active theme. |
 | D-40 | P2 | `ui/themes.py` | A theme switch re-styles every widget (about 0.9 s with all pop-outs created). | Acceptable for a menu action. If it grows, cache the light QSS per original string. |
 
@@ -54,3 +53,6 @@ The IDs are stable. Reference them in commits ("fix D-07") and keep this file cu
 | D-35 | P2 | `glide_string_pitch` was unused; one thread per note. | Single scheduler thread (E-11); pedal/bar swells wired to lever and fret changes. | `AudioSchedulerTests`, `test_lever_toggle_swells_ringing_strings` |
 | D-37 | P2 | Unused `get_c6_open_chords` / `get_newman_minor_anchors`. | Removed. | — |
 | D-38 | P2 | Names that sanitize to the same file were only confirmed, not prevented. | `ProfileManager.unique_profile_name` + `ui/profile_prompts.choose_profile_name`: Overwrite / Save as "Name 2" / Cancel. | `ProfileNamingTests` |
+| D-36 | P2 | The permutation table was a set of finger patterns with invented names. Fingers were mapped to fixed strings, so most permutations played the wrong note order, and 18/20/21/23 had placeholder fingerings. | Re-transcribed from Franklin's chart (*Intervals* p. 38 / course handout). Each entry is now (fingering, book notes on E9 strings 8-7-6-5, fingers, string order). `generate_sequence` plays the group in that order. Fingerings may repeat; the note order is unique. | `test_permutations_match_franklin_chart` |
+| D-42 | P2 | The copedant editor's copedant combo listed only the guitar's necks, so saved user profiles didn't appear until they had been loaded from the main window. | The combo also lists saved profiles that aren't open yet; choosing one loads it as a new neck (`_open_profile_in_editor`). Combo items carry `("neck", idx)` / `("profile", name)` data instead of relying on row == neck index. | `test_saved_profiles_are_listed_and_open_as_a_neck` |
+| D-41 | P2 | Permutation trainer: the click (a sound-card sample on a coarse timer) drifted against the MIDI notes and was not selectable; tempo changes needed a stop/start; the strings were copied once (and silently replaced by 8-6-5-4 when fewer than 4 were selected), so they did not follow the fretboard; the modal dialog locked the main window. | MIDI click on the percussion channel through the note scheduler, `Qt.PreciseTimer`, live tempo; click sound and mode selectable and saved; strings follow `canvas.pocket_changed`; modeless single instance. | `test_click_uses_percussion_channel`, `test_permutation_trainer_is_modeless_and_follows_fretboard` |

@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (
 
 from core.models import Neck
 from core.pearls_engine import PearlsEngine, PearlStep
-from core.theory import NOTE_NAMES_SHARP
+from core.theory import note_names, respell
 
 
 class StringsOfPearlsDialog(QDialog):
@@ -53,8 +53,8 @@ class StringsOfPearlsDialog(QDialog):
 
         top_l.addWidget(QLabel("<b>Key Center:</b>"), 0, 0)
         self.combo_key = QComboBox()
-        self.combo_key.addItems(NOTE_NAMES_SHARP)
-        self.combo_key.setCurrentText(self.current_key)
+        self.combo_key.addItems(note_names())
+        self.combo_key.setCurrentText(respell(self.current_key))
         self.combo_key.currentIndexChanged.connect(self._on_config_changed)
         top_l.addWidget(self.combo_key, 0, 1)
 

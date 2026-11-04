@@ -53,8 +53,34 @@ The scratch checks used to build `06` can be the first tests.
 - **E-13** Theme tokens: replace the about 20 inline dark stylesheets with QSS classes driven by `themes.py`, so light mode works everywhere.
 - **E-14** Editor: per-neck working copy with a dirty indicator and "discard changes?" prompt. Undo/redo for matrix edits. Show a validation panel using E-01.
 - **E-15** Delete the dead modules (D-29). Fix `requirements.txt` (D-30). Add `ruff` with a pre-commit hook that rejects `[cite:` markers.
-- **E-16** Performance: cache `resolve_neck_state` by key, give `Neck` a `version` counter that bumps on edit, and run heavy searches (voice leader, voicing finder) in a `QThreadPool` with a progress indicator.
+- **E-16** Performance: cache `resolve_neck_state` by key, give `Neck` a `version` counter that bumps on edit, and run heavy searches (voice leader, Chord Atlas radar) in a `QThreadPool` with a progress indicator.
 - **E-17** PDF: add tables for splits, half-stops and voicing matches (the parameter already exists).
+
+## Phase 6 — Ideas from Franklin's *Intervals* book
+
+These were reviewed against the app on 2026-11-04. The book's open-position pedal/lever chord list (p. 12) and string groups 1–4 already match the app (`test_franklin_pedal_chords`).
+
+- ✅ **E-18 (done)** Extended chord types in `theory.CHORD_FORMULAS`: maj9, 11, 13, 13sus4, 7b9, 7#9, 7b5, 7#5, maj7#5. The book's triad-substitution pages (pp. 24–28) produce these sounds, and the app cannot name them yet. Prerequisite for E-19.
+- ✅ **E-19 (done: `core/triad_explorer.py`, "🔺 Triads Over Chord")** "Triads over a chord" explorer (pp. 20–28). Choose a backing chord (e.g. G7). List the triads built on its 3rd, 5th, b7 and 9, and the altered triads from the melodic minor a half-step up, with what each sounds like (G9, G11, G13sus, G7#5b9…), then click one to show its grips on the neck. Built on `voicing_solver` plus `grip_matches_chord`.
+- **E-20** Triad pairs (p. 24): two triads with no common tones used as a 6-note scale. This can be added as a mode of the scale finder.
+- **E-21** Cadence drills (pp. 33–36):
+  - progression presets for the minor 2-5-1 (Dm7b5–G7–Cm7) and 3-6-2-5-1;
+  - a secondary dominant before every diatonic chord;
+  - Franklin's "roll the dice" randomizer: two random degrees, then a 2-5-1 into each.
+- **E-22** Unison finder drill (p. 13): highlight a note on string 10; the player clicks every unison and octave on the other strings. This fits the flashcard dialog.
+- **E-23** Interval-function tooltips on the lever panel (pp. 8–11), e.g. "A: 5ths → 6ths, forms 6m". Derived from roles, so they stay correct on any copedant.
+- **E-24** Permutations on any 4-note shape (p. 39 etude): allow the trainer to take 4 notes across frets and stances, not just the current pocket, and mark approach notes.
+
+## Phase 7 — Copedant design
+
+- ✅ **E-25 (done: `core/copedant_compare.py`, `ui/copedant_compare_dialog.py`)** Compare Copedants. It shows which chords a copedant change adds or removes (e.g. "NEW chord: G (b3) — with LKR, strings 10-9-6"), in total, per change, and as combined effects. There are two entry points: Copedant ▸ Compare Copedants… (any two necks; double-click puts a way on the fretboard when it belongs to the active neck) and the editor's "🔍 Compare to Saved" button. Follow-ups (also done):
+  - the window is modeless and follows the active neck; double-clicking a way on the other neck switches to it and plays it;
+  - filters for chord types, no-5th shells, max controllers and "only using" pedals/levers, with statuses recomputed inside the filter;
+  - a global sharps/flats preference (Preferences ▸ Note Spelling) shared by the fretboard, the chord badge and the compare window.
+- ✅ **E-26 (done)** Changer configuration per copedant (default 3 up – 3 down; presets 4/2, 3/2, 2/2, 4/3, 4/4 or custom). The editor shows per-string usage, outlines over-limit pulls and refuses Apply while any string needs more raises or lowers than the changer holds (`core.models.changer_violations`).
+- ✅ **E-27 (done: `core/chord_atlas.py`, `ui/chord_atlas_dialog.py`)** Chord Atlas: every chord the selected copedant can play at one bar position, with every way to play it (stance + grip). It uses the Compare Copedants format and filters, adds grip configurations (pocket presets, voicing-finder grips, current pocket, custom groups, sizes, span), and shows By chord / By stance / Coverage (chord type × degree) views. It is modeless and follows the active neck and pocket; double-click auditions.
+- ✅ **E-28 (done)** Merged the Voicing Finder & Position Solver into the Chord Atlas: Find mode (every position of one chord on frets 0..N, with ergonomics, inversion, intervals and tones to leave out), the Circle-of-Fifths radar for any selected way, and every Finder entry point (toolbar, harmonic panel, View menu) opening Find mode. `ui/voicing_dialog.py` was removed. Browsing now uses one engine, so Explore and Find can't disagree; `VoicingSolver` still serves the voice leader, triad explorer, circle of fifths and the radar (unifying those is a possible follow-up).
+- ✅ **E-29 (done)** The Chord Atlas radar runs on the atlas match rule (`chord_atlas.find_neighbors`): every suggested IV/V/V7/vi/ii sounds its whole chord, and it is about 7x faster. The pedal/lever filter gained match modes (exactly / including / only these and open); Exactly these is the default.
 
 ## Working agreement for future AI sessions
 

@@ -13,49 +13,43 @@ class PickEvent:
     is_downbeat: bool = False
 
 
-# The 24 Mathematical Right-Hand Picking Permutations (Franklin, pp. 37-39)
-FRANKLIN_24_PERMUTATIONS: Dict[int, Tuple[str, str, Tuple[str, str, str, str]]] = {
-    1:  ("T - T - I - M", "Thumb Double-Tap Start", ("T", "T", "I", "M")),
-    2:  ("T - I - M - T", "Standard Forward Roll",   ("T", "I", "M", "T")),
-    3:  ("I - M - T - T", "Inside-Out Drag",         ("I", "M", "T", "T")),
-    4:  ("M - T - I - M", "Middle Lead Cross-Pick",  ("M", "T", "I", "M")),
-    5:  ("M - M - I - T", "Middle Double-Tap",       ("M", "M", "I", "T")),
-    6:  ("M - I - T - M", "Outside-In Roll",         ("M", "I", "T", "M")),
-    7:  ("I - T - M - I", "Index Lead Interlock",    ("I", "T", "M", "I")),
-    8:  ("T - M - I - T", "Thumb-Middle Pinch Jump", ("T", "M", "I", "T")),
-    9:  ("M - T - I - T", "Bounce Alternation",      ("M", "T", "I", "T")),
-    10: ("I - M - T - M", "Gallop Inversion",        ("I", "M", "T", "M")),
-    11: ("M - T - M - T", "Strict Tremolo Rock",     ("M", "T", "M", "T")),
-    12: ("T - M - T - I", "Syncopated Pivot",        ("T", "M", "T", "I")),
-    13: ("T - M - T - M", "Pendulum Pivot",          ("T", "M", "T", "M")),
-    14: ("M - T - M - I", "Reverse Pendulum",        ("M", "T", "M", "I")),
-    15: ("T - M - I - M", "Double-Middle Roll",      ("T", "M", "I", "M")),
-    16: ("I - T - M - T", "Stride Interlock",        ("I", "T", "M", "T")),
-    17: ("M - I - T - I", "Double-Index Bounce",     ("M", "I", "T", "I")),
-    18: ("T - T - M - I", "Thumb Double-Tap Reverse", ("T", "T", "M", "I")),
-    19: ("T - I - M - M", "Inside Double-Middle",    ("T", "I", "M", "M")),
-    20: ("T - I - T - M", "Thumb Pivot Climb",       ("T", "I", "T", "M")),
-    21: ("I - T - I - M", "Index Pivot Climb",       ("I", "T", "I", "M")),
-    22: ("I - M - I - T", "Index Alternate Bounce",  ("I", "M", "I", "T")),
-    23: ("M - I - T - T", "Backward Roll Thumb Finish", ("M", "I", "T", "T")),
-    24: ("I - T - T - M", "Inside Thumb Split",      ("I", "T", "T", "M")),
-}
-
-# Standard string assignment mapping for a 4-string group (e.g., 4, 5, 6, 8)
-# Low string to high string: Thumb handles lowest two, Index middle, Middle top
-FINGER_TO_STRING_OFFSET: Dict[str, int] = {
-    "T": 0,  # Lower bass strings
-    "I": 2,  # Middle string
-    "M": 3,  # Top string
+# Paul Franklin's 24 picking permutations, transcribed from the chart in "Intervals" (p. 38) and the
+# course handout (D-36). Each one plays the 4 strings of a group once each, in a different order:
+# (fingering, book notes, fingers, order). The book demonstrates them on E9 strings 8-7-6-5 open
+# (E F# G# B); `order` gives the string positions within the group, 0 = lowest pitch .. 3 = highest.
+# Fingerings repeat (e.g. #2 and #21 are both T-I-M-T); the note order is what makes each unique.
+FRANKLIN_24_PERMUTATIONS: Dict[int, Tuple[str, str, Tuple[str, str, str, str], Tuple[int, int, int, int]]] = {
+    1:  ("T - T - I - M", "E F# G# B",  ("T", "T", "I", "M"), (0, 1, 2, 3)),
+    2:  ("T - I - M - T", "F# G# B E",  ("T", "I", "M", "T"), (1, 2, 3, 0)),
+    3:  ("I - M - T - T", "G# B E F#",  ("I", "M", "T", "T"), (2, 3, 0, 1)),
+    4:  ("M - T - I - M", "B E F# G#",  ("M", "T", "I", "M"), (3, 0, 1, 2)),
+    5:  ("M - M - I - T", "B G# F# E",  ("M", "M", "I", "T"), (3, 2, 1, 0)),
+    6:  ("M - I - T - M", "G# F# E B",  ("M", "I", "T", "M"), (2, 1, 0, 3)),
+    7:  ("I - T - M - I", "F# E B G#",  ("I", "T", "M", "I"), (1, 0, 3, 2)),
+    8:  ("T - M - I - T", "E B G# F#",  ("T", "M", "I", "T"), (0, 3, 2, 1)),
+    9:  ("M - T - I - T", "B F# G# E",  ("M", "T", "I", "T"), (3, 1, 2, 0)),
+    10: ("I - M - T - M", "F# G# E B",  ("I", "M", "T", "M"), (1, 2, 0, 3)),
+    11: ("M - T - M - T", "G# E B F#",  ("M", "T", "M", "T"), (2, 0, 3, 1)),
+    12: ("T - M - T - I", "E B F# G#",  ("T", "M", "T", "I"), (0, 3, 1, 2)),
+    13: ("T - M - T - M", "F# B E G#",  ("T", "M", "T", "M"), (1, 3, 0, 2)),
+    14: ("M - T - M - I", "B E G# F#",  ("M", "T", "M", "I"), (3, 0, 2, 1)),
+    15: ("T - M - I - M", "E G# F# B",  ("T", "M", "I", "M"), (0, 2, 1, 3)),
+    16: ("I - T - M - T", "G# F# B E",  ("I", "T", "M", "T"), (2, 1, 3, 0)),
+    17: ("M - I - T - I", "B G# E F#",  ("M", "I", "T", "I"), (3, 2, 0, 1)),
+    18: ("M - T - I - M", "G# E F# B",  ("M", "T", "I", "M"), (2, 0, 1, 3)),
+    19: ("T - I - M - M", "E F# B G#",  ("T", "I", "M", "M"), (0, 1, 3, 2)),
+    20: ("T - M - I - T", "F# B G# E",  ("T", "M", "I", "T"), (1, 3, 2, 0)),
+    21: ("T - I - M - T", "E G# B F#",  ("T", "I", "M", "T"), (0, 2, 3, 1)),
+    22: ("I - M - I - T", "G# B F# E",  ("I", "M", "I", "T"), (2, 3, 1, 0)),
+    23: ("M - I - T - M", "B F# E G#",  ("M", "I", "T", "M"), (3, 1, 0, 2)),
+    24: ("I - T - T - M", "F# E G# B",  ("I", "T", "T", "M"), (1, 0, 2, 3)),
 }
 
 
 class PermutationEngine:
     @classmethod
-    def get_permutation_info(cls, perm_id: int) -> Tuple[str, str, Tuple[str, str, str, str]]:
-        return FRANKLIN_24_PERMUTATIONS.get(
-            perm_id, ("T - I - M - T", "Standard Forward Roll", ("T", "I", "M", "T"))
-        )
+    def get_permutation_info(cls, perm_id: int) -> Tuple[str, str, Tuple[str, str, str, str], Tuple[int, int, int, int]]:
+        return FRANKLIN_24_PERMUTATIONS.get(perm_id, FRANKLIN_24_PERMUTATIONS[1])
 
     @classmethod
     def generate_sequence(
@@ -78,27 +72,15 @@ class PermutationEngine:
         else:
             sorted_strs = bass_first * 4
 
-        # sorted_strs[0] is the lowest-pitched string (highest number, e.g. 8): thumb
-        # sorted_strs[3] is the highest-pitched string (lowest number, e.g. 4): middle finger
-        _, _, pattern = cls.get_permutation_info(perm_id)
+        # sorted_strs[0] is the lowest-pitched string, sorted_strs[3] the highest (book: strings 8..5).
+        _, _, pattern, order = cls.get_permutation_info(perm_id)
 
         events: List[PickEvent] = []
         step_counter = 0
 
         for cycle in range(cycles):
-            for beat_idx, finger in enumerate(pattern):
-                # Map finger to relative string within the 4-string pocket
-                if finger == "T":
-                    # Alternate thumb between lowest and second-lowest string if consecutive
-                    if beat_idx > 0 and pattern[beat_idx - 1] == "T":
-                        str_num = sorted_strs[1]
-                    else:
-                        str_num = sorted_strs[0]
-                elif finger == "I":
-                    str_num = sorted_strs[2]
-                else:  # "M"
-                    str_num = sorted_strs[3]
-
+            for beat_idx, (finger, position) in enumerate(zip(pattern, order)):
+                str_num = sorted_strs[position]
                 events.append(
                     PickEvent(
                         step_index=step_counter,

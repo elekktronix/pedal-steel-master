@@ -49,8 +49,7 @@ from ui.relative_moves_widget import RelativeMovesWidget
 from ui.scale_finder_widget import ScaleFinderWidget
 from ui.stance_chord_inspector_dialog import StanceChordInspectorDialog
 from ui.themes import DARK_THEME_QSS, LIGHT_THEME_QSS, ThemeManager
-from ui.voicing_dialog import VoicingFinderWidget
-from core.theory import to_root_name
+from core.theory import note_names, set_accidental_preference, set_key_aware_spelling, to_root_name
 
 log = logging.getLogger(__name__)
 
@@ -64,6 +63,8 @@ class MainWindow(QMainWindow):
 
         ProfileManager.ensure_storage_dir()
         self.settings = load_settings()
+        set_accidental_preference(self.settings.get("note_spelling", "sharps"))
+        set_key_aware_spelling(self.settings.get("key_aware_spelling", True))
 
         self.audio = MidiAudioEngine()
         self.audio.set_compensated_temperament(self.settings.get("use_newman_tuning", False))
@@ -261,8 +262,14 @@ class MainWindow(QMainWindow):
 
         self.btn_pop_chord = QPushButton("🔍 Chord Finder")
         self.btn_pop_chord.setStyleSheet(tool_btn_style)
-        self.btn_pop_chord.clicked.connect(self._toggle_voicing_popout)
+        self.btn_pop_chord.setToolTip("Chord Atlas in Find mode: every position of the harmonic target chord")
+        self.btn_pop_chord.clicked.connect(self._open_chord_finder)
         row2_bar.addWidget(self.btn_pop_chord)
+
+        self.btn_pop_triads = QPushButton("🔺 Triads Over Chord")
+        self.btn_pop_triads.setStyleSheet(tool_btn_style)
+        self.btn_pop_triads.clicked.connect(self._open_triad_explorer)
+        row2_bar.addWidget(self.btn_pop_triads)
 
         self.btn_pop_scale = QPushButton("🎼 Scale Finder")
         self.btn_pop_scale.setStyleSheet(tool_btn_style)
@@ -425,7 +432,7 @@ class MainWindow(QMainWindow):
         self.harmonic_panel = HarmonicTargetPanel(self)
         self.harmonic_panel.target_changed.connect(self._on_harmonic_target_changed)
         self.harmonic_panel.reset_requested.connect(self.lever_panel.reset_all)
-        self.harmonic_panel.find_voicings_requested.connect(self._toggle_voicing_popout)
+        self.harmonic_panel.find_voicings_requested.connect(self._open_chord_finder)
         bottom_row.addWidget(self.harmonic_panel, stretch=1)
 
         root_layout.addLayout(bottom_row, stretch=0)
@@ -433,7 +440,7 @@ class MainWindow(QMainWindow):
     def _populate_up_neck_dropdown(self):
         self.combo_up_neck_chord.blockSignals(True)
         self.combo_up_neck_chord.clear()
-        roots = ["C", "Db", "D", "Eb", "E", "F", "F#", "G", "Ab", "A", "Bb", "B"]
+        roots = note_names()  # global sharps/flats preference
         for r in roots:
             self.combo_up_neck_chord.addItem(f"{r} Major", (r, "Major"))
             self.combo_up_neck_chord.addItem(f"{r} Minor", (r, "Minor"))
@@ -718,8 +725,6 @@ class MainWindow(QMainWindow):
             self.action_c6_franklin_offset.setChecked(has_franklin)
             self.action_c6_franklin_offset.blockSignals(False)
 
-        if hasattr(self, "voicing_finder"):
-            self.voicing_finder.update_neck(neck)
         if hasattr(self, "scale_finder"):
             self.scale_finder.update_neck(neck)
         if hasattr(self, "circle_widget"):
@@ -732,6 +737,10 @@ class MainWindow(QMainWindow):
 
         self.harmonic_panel._on_change()
         self._update_star_map_ribbon()
+        if getattr(self, "_compare_dlg", None) is not None:  # E-25: keep the compare window in sync
+            self._compare_dlg.set_active_neck(self.current_neck_idx, self.guitar)
+        if getattr(self, "_atlas_dlg", None) is not None:  # E-27
+            self._atlas_dlg.set_active_neck(self.current_neck_idx, self.guitar)
         self._update_relative_moves_hub()
         self._update_stance_inspector_if_open()
 
@@ -824,6 +833,45 @@ class MainWindow(QMainWindow):
             self.btn_toggle_nns.blockSignals(False)
         self.canvas.set_show_nashville(checked)
 
+    def _set_note_spelling(self, pref: str):
+        """Preferences > Note Spelling: one global sharps/flats choice for every displayed name."""
+        from PySide6.QtWidgets import QApplication, QComboBox
+
+        from core.theory import NOTE_TO_SEMITONE, respell
+        set_accidental_preference(pref)
+        self.settings["note_spelling"] = pref
+        save_settings(self.settings)
+        # Respell every live root/key dropdown in place (items that are bare note names only).
+        for w in QApplication.allWidgets():
+            if isinstance(w, QComboBox) and not w.property("keepSpelling"):
+                w.blockSignals(True)
+                for i in range(w.count()):
+                    text = w.itemText(i)
+                    if text in NOTE_TO_SEMITONE:
+                        w.setItemText(i, respell(text))
+                w.blockSignals(False)
+        up_neck = self.combo_up_neck_chord.currentData()
+        self._populate_up_neck_dropdown()
+        if up_neck:
+            self._sync_up_neck_dropdown_from_panel(up_neck[0], up_neck[1])
+        self.canvas.update_state()            # fretboard note names and the detected-chord badge
+        if hasattr(self, "circle_widget"):    # diatonic names follow this when key-aware spelling is off
+            self.circle_widget._refresh_family_buttons()
+            self.circle_widget.canvas_wheel.update()
+        self.harmonic_panel._on_change()      # dependent views (ribbon, hub, finders)
+        for w in QApplication.topLevelWidgets():
+            if hasattr(w, "on_note_spelling_changed"):
+                w.on_note_spelling_changed()
+
+    def _set_key_aware_spelling(self, enabled: bool):
+        """Preferences > Note Spelling > key-aware tools (circle of fifths, triads over a chord)."""
+        set_key_aware_spelling(enabled)
+        self.settings["key_aware_spelling"] = bool(enabled)
+        save_settings(self.settings)
+        if hasattr(self, "circle_widget"):
+            self.circle_widget._refresh_family_buttons()
+            self.circle_widget.canvas_wheel.update()
+
     def _toggle_inversions_preference(self):
         show = self.action_inversions.isChecked()
         self.settings["show_inversions"] = show
@@ -850,13 +898,6 @@ class MainWindow(QMainWindow):
     def _init_popout_windows(self):
         current_neck = self.guitar.necks[self.current_neck_idx]
 
-        self.voicing_finder = VoicingFinderWidget(neck=current_neck, parent=self)
-        self.voicing_finder.setWindowFlags(Qt.Window)
-        self.voicing_finder.setWindowTitle("Chord Voicing Finder & Position Solver")
-        self.voicing_finder.resize(920, 500)
-        self.voicing_finder.voicing_applied.connect(self._apply_solved_voicing)
-        self.voicing_finder.target_changed.connect(self.harmonic_panel.set_target)
-
         show_scale_box = self.settings.get("show_scale_box", True)
         self.scale_finder = ScaleFinderWidget(
             neck=current_neck,
@@ -880,18 +921,10 @@ class MainWindow(QMainWindow):
         self.circle_widget.resize(760, 480)
         self.circle_widget.chord_triggered.connect(self._on_circle_chord_triggered)
 
-    def _toggle_voicing_popout(self):
-        if self.voicing_finder.isVisible():
-            self.voicing_finder.hide()
-        else:
-            root = self.harmonic_panel.get_root()
-            chord_type = self.harmonic_panel.get_chord_type()
-            if root == "None":
-                root = "E"
-            self.voicing_finder.set_target(root, chord_type)
-            self.voicing_finder.show()
-            self.voicing_finder.raise_()
-            self.voicing_finder.activateWindow()
+    def _open_chord_finder(self):  # E-28: the Voicing Finder is the Chord Atlas' Find mode
+        root = self.harmonic_panel.get_root()
+        self._open_chord_atlas(find_root="E" if root == "None" else root,
+                               find_chord_type=self.harmonic_panel.get_chord_type())
 
     def _toggle_scale_popout(self):
         if self.scale_finder.isVisible():
@@ -1089,15 +1122,118 @@ class MainWindow(QMainWindow):
     def _on_star_map_dialog_selected(self, fret: int, controllers: set, target_strings: set):
         self.apply_stance(fret, controllers, target_strings)
 
+    def _open_triad_explorer(self):  # E-19
+        from ui.triad_explorer_dialog import TriadExplorerDialog
+        root = self.harmonic_panel.get_root()
+        dlg = TriadExplorerDialog(
+            neck=self.guitar.necks[self.current_neck_idx],
+            root=None if root == "None" else root,
+            chord_type=self.harmonic_panel.get_chord_type(),
+            parent=self,
+        )
+        dlg.grip_selected.connect(self._on_triad_grip_selected)
+        dlg.exec()
+
+    def _on_triad_grip_selected(self, fret: int, controllers: set, strings: set, root: str, chord_type: str):
+        self.harmonic_panel.set_target(root, chord_type)  # canvas labels the triad over the backing chord
+        self.apply_stance(fret, controllers, strings)
+
+    def _open_chord_atlas(self, find_root: Optional[str] = None, find_chord_type: Optional[str] = None):  # E-27/E-28
+        """Modeless: every chord at one bar position (Explore), or every position of one chord
+        (Find, when `find_root` is given; replaces the old Voicing Finder window)."""
+        from ui.chord_atlas_dialog import MODE_FIND, ChordAtlasDialog
+        existing = getattr(self, "_atlas_dlg", None)
+        if existing is not None:
+            if find_root:
+                existing.set_find_target(find_root, find_chord_type)
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        dlg = ChordAtlasDialog(
+            neck=self.guitar.necks[self.current_neck_idx],
+            guitar=self.guitar,
+            neck_idx=self.current_neck_idx,
+            active_neck_idx=self.current_neck_idx,
+            current_pocket=self.canvas.active_pocket,
+            mode=MODE_FIND if find_root else "explore",
+            find_root=find_root,
+            find_chord_type=find_chord_type,
+            parent=self,
+        )
+        dlg.setWindowFlags(Qt.Window)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.stance_selected.connect(self._on_triad_grip_selected)  # set target, then apply_stance
+        dlg.activate_neck_requested.connect(self._select_copedant_index)
+        dlg.target_changed.connect(self.harmonic_panel.set_target)  # Find mode target follows
+        self.canvas.pocket_changed.connect(dlg.set_current_pocket)
+        dlg.destroyed.connect(lambda *_: setattr(self, "_atlas_dlg", None))
+        self._atlas_dlg = dlg
+        dlg.show()
+
+    def _default_compare_target(self) -> int:
+        """Neck to compare the active one against: preferably a copy of it, else the next neck."""
+        necks = self.guitar.necks
+        base = necks[self.current_neck_idx]
+        others = [i for i in range(len(necks)) if i != self.current_neck_idx]
+        if not others:
+            return self.current_neck_idx
+        copies = [i for i in others
+                  if base.name.lower() in necks[i].name.lower() or "copy" in necks[i].name.lower()]
+        if copies:
+            return copies[0]
+        later = [i for i in others if i > self.current_neck_idx]
+        return later[0] if later else others[0]
+
+    def _open_copedant_compare(self):  # E-25
+        """Modeless: the main window stays usable (switch necks, audition) while it is open."""
+        from ui.copedant_compare_dialog import CopedantCompareDialog
+        existing = getattr(self, "_compare_dlg", None)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
+        target = self._default_compare_target()
+        dlg = CopedantCompareDialog(
+            base=self.guitar.necks[self.current_neck_idx],
+            modified=self.guitar.necks[target],
+            guitar=self.guitar,
+            base_idx=self.current_neck_idx,
+            modified_idx=target,
+            active_neck_idx=self.current_neck_idx,
+            parent=self,
+        )
+        dlg.setWindowFlags(Qt.Window)
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.stance_selected.connect(self._on_triad_grip_selected)  # same flow: set target, then apply_stance
+        dlg.activate_neck_requested.connect(self._select_copedant_index)
+        dlg.destroyed.connect(lambda *_: setattr(self, "_compare_dlg", None))
+        self._compare_dlg = dlg
+        dlg.show()
+
     def _open_permutation_trainer(self):
         from ui.permutation_trainer_dialog import PermutationTrainerDialog
+        existing = getattr(self, "_perm_trainer", None)
+        if existing is not None:
+            existing.show()
+            existing.raise_()
+            existing.activateWindow()
+            return
         neck = self.guitar.necks[self.current_neck_idx]
+        if len(self.canvas.active_pocket) < 4 and neck.string_count >= 8:
+            # Permutations are 4-note patterns: start on the book's group (strings 8-7-6-5).
+            self._apply_pocket_preset({8, 7, 6, 5})
         dlg = PermutationTrainerDialog(
             neck=neck,
             active_pocket=self.canvas.active_pocket,
             parent=self,
         )
-        dlg.exec()
+        # Non-modal: the fretboard stays usable, and the trainer follows its pocket and stance.
+        dlg.setAttribute(Qt.WA_DeleteOnClose)
+        dlg.destroyed.connect(lambda *_: setattr(self, "_perm_trainer", None))
+        self._perm_trainer = dlg
+        dlg.show()
 
     def _open_copedant_editor(self, initial_tab: Optional[str] = None):
         neck = self.guitar.necks[self.current_neck_idx]
@@ -1336,8 +1472,6 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         save_session(self._capture_session())
         self._save_active_guitar_setup()
-        if hasattr(self, "voicing_finder"):
-            self.voicing_finder.close()
         if hasattr(self, "scale_finder"):
             self.scale_finder.close()
         if hasattr(self, "circle_widget"):

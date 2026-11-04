@@ -26,7 +26,17 @@ from core.circle_of_fifths import (
     CircleOfFifthsEngine,
 )
 from core.models import Neck
+from core.theory import NOTE_TO_SEMITONE, to_root_name
 from core.voicing_solver import VoicingSolver
+
+
+def _pc(name: Optional[str]) -> Optional[int]:
+    return NOTE_TO_SEMITONE.get(name) if name else None
+
+
+def _same_chord(a: Optional[Tuple[str, str]], root: str, chord_type: str) -> bool:
+    """Chord equality by pitch class, so 'Db' (wheel) and 'C#' (diatonic list) match."""
+    return a is not None and a[1] == chord_type and _pc(a[0]) is not None and _pc(a[0]) == _pc(root)
 
 
 class CircleWheelCanvas(QWidget):
@@ -62,9 +72,9 @@ class CircleWheelCanvas(QWidget):
         core_radius = r_dom7_inner
 
         diatonics = CircleOfFifthsEngine.get_diatonic_chords(self.key_center)
-        major_diatonics = {d.root_name for d in diatonics if d.chord_type == "Major" and d.role != "I"}
-        minor_diatonics = {d.root_name for d in diatonics if d.chord_type == "Minor"}
-        v_chord_root = next((d.root_name for d in diatonics if d.role == "V"), "")
+        major_diatonics = {_pc(d.root_name) for d in diatonics if d.chord_type == "Major" and d.role != "I"}
+        minor_diatonics = {_pc(d.root_name) for d in diatonics if d.chord_type == "Minor"}
+        v_chord_pc = next((_pc(d.root_name) for d in diatonics if d.role == "V"), None)
 
         sector_angle = 360.0 / 12.0
 
@@ -75,13 +85,13 @@ class CircleWheelCanvas(QWidget):
 
             # 1. Outer Ring: Major
             major_path = self._create_sector_path(center, r_major_inner, outer_radius, start_angle, sector_angle)
-            is_active_major = (self.active_chord == (key, "Major"))
+            is_active_major = _same_chord(self.active_chord, key, "Major")
 
-            if key == self.key_center:
+            if _pc(key) == _pc(self.key_center):
                 brush_maj = QBrush(QColor(13, 110, 253))
                 pen_maj = QPen(QColor(255, 255, 255), 3.0 if is_active_major else 2.0)
                 text_col_maj = QColor(255, 255, 255)
-            elif key in major_diatonics:
+            elif _pc(key) in major_diatonics:
                 brush_maj = QBrush(QColor(40, 167, 69, 230))
                 pen_maj = QPen(QColor(255, 255, 255) if is_active_major else QColor(45, 52, 60), 2.5 if is_active_major else 1.0)
                 text_col_maj = QColor(255, 255, 255)
@@ -103,9 +113,9 @@ class CircleWheelCanvas(QWidget):
 
             # 2. Middle Ring: Relative Minor
             minor_path = self._create_sector_path(center, r_minor_inner, r_major_inner, start_angle, sector_angle)
-            is_active_minor = (self.active_chord == (rel_minor, "Minor"))
+            is_active_minor = _same_chord(self.active_chord, rel_minor, "Minor")
 
-            if rel_minor in minor_diatonics:
+            if _pc(rel_minor) in minor_diatonics:
                 brush_min = QBrush(QColor(255, 193, 7, 230))
                 pen_min = QPen(QColor(255, 255, 255) if is_active_minor else QColor(45, 52, 60), 2.5 if is_active_minor else 1.0)
                 text_col_min = QColor(20, 20, 20)
@@ -127,9 +137,9 @@ class CircleWheelCanvas(QWidget):
 
             # 3. Inner Ring: Dominant 7th
             dom7_path = self._create_sector_path(center, r_dom7_inner, r_minor_inner, start_angle, sector_angle)
-            is_active_dom7 = (self.active_chord == (key, "Dominant 7th"))
+            is_active_dom7 = _same_chord(self.active_chord, key, "Dominant 7th")
 
-            if key == v_chord_root:
+            if _pc(key) == v_chord_pc:
                 brush_d7 = QBrush(QColor(220, 53, 69, 230))
                 pen_d7 = QPen(QColor(255, 255, 255), 3.0 if is_active_dom7 else 1.5)
                 text_col_d7 = QColor(255, 255, 255)
@@ -232,6 +242,7 @@ class CircleOfFifthsWidget(QWidget):
         top_bar.addWidget(QLabel("<b>Key Center:</b>"))
         self.combo_key = QComboBox()
         self.combo_key.addItems(CIRCLE_KEYS_CLOCKWISE)
+        self.combo_key.setProperty("keepSpelling", True)  # traditional circle key names; skip global respell
         self.combo_key.setCurrentText("G")
         self.combo_key.currentIndexChanged.connect(self._on_key_combo_changed)
         top_bar.addWidget(self.combo_key)
@@ -410,6 +421,7 @@ class CircleOfFifthsWidget(QWidget):
         self._refresh_family_buttons()
 
     def set_key_center(self, key: str):
+        key = to_root_name(key, CIRCLE_KEYS_CLOCKWISE) or key  # any spelling -> the wheel's key name
         if key in CIRCLE_KEYS_CLOCKWISE:
             self.current_key = key
             self.combo_key.blockSignals(True)
@@ -559,7 +571,7 @@ class CircleOfFifthsWidget(QWidget):
         for data in self.family_buttons_data:
             btn = data["button"]
             role = data["role"]
-            is_match = (data["root"] == root and data["chord_type"] == chord_type)
+            is_match = _same_chord((data["root"], data["chord_type"]), root, chord_type)
             self._style_family_button(btn, role, is_active=is_match)
 
     def _style_family_button(self, btn: QPushButton, role: str, is_active: bool):

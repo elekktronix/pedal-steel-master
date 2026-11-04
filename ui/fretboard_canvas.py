@@ -407,18 +407,18 @@ class FretboardCanvas(QWidget):
                     lbl = state.interval_label or ""
                     if lbl in ("R", "1"):
                         fill = self.color_root
+                    elif lbl in ("2", "9", "b9", "#9"):  # extensions first: "13" must not match "3"
+                        fill = QColor(23, 162, 184)
+                    elif lbl in ("4", "11", "#11"):
+                        fill = QColor(111, 66, 193)
+                    elif lbl in ("6", "13", "b13"):
+                        fill = QColor(253, 126, 20)
                     elif "3" in lbl:
                         fill = self.color_third
                     elif "5" in lbl:
                         fill = self.color_fifth
                     elif "7" in lbl:
                         fill = self.color_seventh
-                    elif lbl in ("2", "9"):
-                        fill = QColor(23, 162, 184)
-                    elif lbl in ("4", "11"):
-                        fill = QColor(111, 66, 193)
-                    elif lbl in ("6", "13"):
-                        fill = QColor(253, 126, 20)
 
                 if not is_in_pocket:
                     fill = QColor(fill.red(), fill.green(), fill.blue(), 50)

@@ -14,7 +14,8 @@ Neck
  ├─ half_stops:  List[HalfStopRule]         # (controller_id, string) -> intermediate delta
  ├─ splits:      List[SplitRule]            # (string, {controllers}) -> net delta override
  ├─ description, author, author_bio, social_media   # metadata only
- └─ source_profile: str                     # profile file this neck is linked to ("" = none)
+ ├─ source_profile: str                     # profile file this neck is linked to ("" = none)
+ └─ changer_raises, changer_lowers: int     # changer configuration (E-26), default 3 up – 3 down
 StringPitch    { string_number, midi_note, note_name }   # note_name like "G#3" (sharps)
 CopedantChange { id, label, changes: Dict[string_number -> semitone_delta] }   # zero deltas omitted
 HalfStopRule   { controller_id, string_number, semitone_delta, is_active, description }
@@ -27,13 +28,14 @@ SplitRule      { string_number, controllers: List[str] (>=2), semitone_delta, is
 - `SplitRule.semitone_delta` is the **net offset from the open string** with all listed controllers engaged. It is not an offset applied on top of the sum.
 - `HalfStopRule.semitone_delta` is the net offset from the open string when the controller is half-engaged.
 - `is_active=False` rules are kept in the data but ignored by the resolver ("Include/Exclude" in PSG Compass).
+- **Changer configuration (E-26):** `changer_raises` / `changer_lowers` are the most controllers that may raise / lower one string. Every pedal or lever with a positive delta on a string uses one raise finger; a negative delta uses one lower finger. Half-stops and splits use no extra finger. `changer_usage(neck)` lists the controllers per string and direction, and `changer_violations(neck)` returns a `ChangerViolation(string_number, direction, controllers, limit)` for each string over the limit. `CHANGER_PRESETS` are the configurations offered in the editor; `DEFAULT_CHANGER = (3, 3)`. Every factory preset fits the default (tested).
 - `neck_type` decides which engine path runs. Many places **also** check `"C6" in neck.name` as a fallback, so renaming a neck can change its behavior.
 
 ## Serialization
 
 | Method | Format |
 |---|---|
-| `Neck.to_dict / from_dict` | Native format. String-number dict keys are cast back to `int`. Missing `half_stops`/`splits` default to `[]`. An unknown `neck_type` raises `ValueError`. |
+| `Neck.to_dict / from_dict` | Native format. String-number dict keys are cast back to `int`. Missing `half_stops`/`splits` default to `[]`. `"changer": {"raises", "lowers"}`; files saved without it load as 3 up – 3 down. An unknown `neck_type` raises `ValueError`. |
 | `Neck.from_compass_json` | PSG Compass export: `strings[].openNote`, `pedals[]`, `kneeLevers[]`, `detectedSplits[]`. Zero deltas are dropped. A knee lever with no changes is kept only if `active` is true. `neck_type` is inferred from string count or name. Half-stops are **not** imported. |
 | `SteelGuitar.save_to_file / load_from_file` | `{name, necks:[...]}` |
 

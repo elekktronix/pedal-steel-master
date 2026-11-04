@@ -50,6 +50,27 @@ CHORD_FORMULAS: Dict[str, Dict[int, str]] = {
     "Sus4": {0: "R", 5: "4", 7: "5"},
     "Half-Diminished": {0: "R", 3: "b3", 6: "b5", 10: "b7"},
     "6/9": {0: "R", 2: "9", 4: "3", 7: "5", 9: "6"},
+    # Extended and altered types (E-18; Franklin "Intervals" pp. 24-28)
+    "Major 9th": {0: "R", 2: "9", 4: "3", 7: "5", 11: "7"},
+    "Minor 9th": {0: "R", 2: "9", 3: "b3", 7: "5", 10: "b7"},
+    "Dominant 11th": {0: "R", 2: "9", 5: "11", 7: "5", 10: "b7"},          # 9sus4: the 3rd is omitted
+    "Dominant 13th": {0: "R", 2: "9", 4: "3", 7: "5", 9: "13", 10: "b7"},  # the 11 is omitted
+    "Dominant 13sus4": {0: "R", 2: "9", 5: "11", 7: "5", 9: "13", 10: "b7"},
+    "Dominant 7b9": {0: "R", 1: "b9", 4: "3", 7: "5", 10: "b7"},
+    "Dominant 7#9": {0: "R", 3: "#9", 4: "3", 7: "5", 10: "b7"},
+    "Dominant 7b5": {0: "R", 4: "3", 6: "b5", 10: "b7"},
+    "Dominant 7#5": {0: "R", 4: "3", 8: "#5", 10: "b7"},
+    "Major 7th #5": {0: "R", 4: "3", 8: "#5", 11: "7"},
+}
+
+# Chord symbol suffix per CHORD_FORMULAS key ("G" + "13sus4"), used for display names.
+CHORD_SYMBOL_SUFFIX: Dict[str, str] = {
+    "Major": "", "Minor": "m", "Dominant 7th": "7", "Major 7th": "maj7", "Minor 7th": "m7",
+    "Major 6th": "6", "Minor 6th": "m6", "Dominant 9th": "9", "Diminished": "dim",
+    "Diminished 7th": "dim7", "Augmented": "+", "Sus4": "sus4", "Half-Diminished": "m7b5",
+    "6/9": "6/9", "Major 9th": "maj9", "Minor 9th": "m9", "Dominant 11th": "11",
+    "Dominant 13th": "13", "Dominant 13sus4": "13sus4", "Dominant 7b9": "7b9",
+    "Dominant 7#9": "7#9", "Dominant 7b5": "7b5", "Dominant 7#5": "7#5", "Major 7th #5": "maj7#5",
 }
 
 # Standard scale formulas mapping semitone offset -> scale degree label
@@ -101,8 +122,10 @@ def extract_root_and_quality(chord_label: str) -> Tuple[str, str]:
 # Chord family (CHORD_FORMULAS key / ChordIdentifier family) -> Nashville quality suffix
 _NASHVILLE_FAMILY_SUFFIX: Dict[str, str] = {
     "Major": "", "Major 7th": "", "Major 6th": "", "Major 6": "", "6/9": "", "Dyad": "",
-    "Minor": "-", "Minor 7th": "-", "Minor 6th": "-", "Minor 6": "-",
-    "Dominant 7th": "⁷", "Dominant 9th": "⁷",
+    "Major 9th": "", "Major 7th #5": "+",
+    "Minor": "-", "Minor 7th": "-", "Minor 6th": "-", "Minor 6": "-", "Minor 9th": "-",
+    "Dominant 7th": "⁷", "Dominant 9th": "⁷", "Dominant 11th": "⁷", "Dominant 13th": "⁷",
+    "Dominant 13sus4": "⁷", "Dominant 7b9": "⁷", "Dominant 7#9": "⁷", "Dominant 7b5": "⁷", "Dominant 7#5": "⁷",
     "Diminished": "°", "Diminished 7th": "°",
     "Half-Diminished": "ø",
     "Augmented": "+",
@@ -173,9 +196,57 @@ def note_to_midi(name: str, octave: int) -> int:
     return (octave + 1) * 12 + NOTE_TO_SEMITONE[clean_name]
 
 
-def midi_to_note_name(midi: int, prefer_flat: bool = False) -> str:
+# Global display spelling for note and chord names ("sharps" or "flats"). Set from the
+# "note_spelling" setting at startup and from Preferences > Note Spelling. Display only:
+# engines keep accepting either spelling through NOTE_TO_SEMITONE.
+ACCIDENTAL_PREFERENCES = ("sharps", "flats")
+_accidental_preference = "sharps"
+
+
+def set_accidental_preference(pref: str) -> None:
+    global _accidental_preference
+    _accidental_preference = pref if pref in ACCIDENTAL_PREFERENCES else "sharps"
+
+
+def get_accidental_preference() -> str:
+    return _accidental_preference
+
+
+# Key-aware tools (circle of fifths diatonic chords, triads over a chord) spell by key signature
+# when True (default, follows theory: Bb in F, A# in B major); with False they use the global
+# preference too. Setting "key_aware_spelling".
+_key_aware_spelling = True
+
+
+def set_key_aware_spelling(enabled: bool) -> None:
+    global _key_aware_spelling
+    _key_aware_spelling = bool(enabled)
+
+
+def is_key_aware_spelling() -> bool:
+    return _key_aware_spelling
+
+
+def note_names() -> List[str]:
+    """The 12 note names (C first) in the user's preferred spelling."""
+    return list(NOTE_NAMES_FLAT if _accidental_preference == "flats" else NOTE_NAMES_SHARP)
+
+
+def spell_pc(pc: int) -> str:
+    return note_names()[pc % 12]
+
+
+def respell(name: str) -> str:
+    """Respells a note name ('D#', 'Eb', 'B#') in the preferred spelling; other text is returned unchanged."""
+    pc = NOTE_TO_SEMITONE.get(name.strip()) if isinstance(name, str) else None
+    return name if pc is None else spell_pc(pc)
+
+
+def midi_to_note_name(midi: int, prefer_flat: Optional[bool] = None) -> str:
     pitch_class = midi % 12
     octave = (midi // 12) - 1
+    if prefer_flat is None:
+        prefer_flat = _accidental_preference == "flats"
     table = NOTE_NAMES_FLAT if prefer_flat else NOTE_NAMES_SHARP
     return f"{table[pitch_class]}{octave}"
 

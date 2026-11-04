@@ -45,6 +45,15 @@ CHORD_TYPE_MAP = {
     "sus4": "Sus4",
     "sus": "Sus4",
     "69": "6/9",
+    # E-18 extended / altered types
+    "maj9": "Major 9th", "M9": "Major 9th", "Major 9": "Major 9th",
+    "m9": "Minor 9th", "min9": "Minor 9th", "-9": "Minor 9th", "Minor 9": "Minor 9th",
+    "11": "Dominant 11th", "9sus4": "Dominant 11th",
+    "13": "Dominant 13th",
+    "13sus4": "Dominant 13sus4", "13sus": "Dominant 13sus4",
+    "7b9": "Dominant 7b9", "7#9": "Dominant 7#9", "7b5": "Dominant 7b5",
+    "7#5": "Dominant 7#5", "7+5": "Dominant 7#5", "aug7": "Dominant 7#5", "+7": "Dominant 7#5",
+    "maj7#5": "Major 7th #5", "maj7+5": "Major 7th #5",
 }
 
 
@@ -64,7 +73,7 @@ def normalize_chord_type(raw_type: str) -> str:
     for v in (raw + "th", raw.replace(" 7", " 7th"), raw.replace(" 7th", " 7")):
         if v in CHORD_FORMULAS:
             return v
-    lowered = {k.lower(): v for k, v in CHORD_TYPE_MAP.items() if k not in ("M", "M7")}
+    lowered = {k.lower(): v for k, v in CHORD_TYPE_MAP.items() if k not in ("M", "M7", "M9")}
     lowered.update({k.lower(): k for k in CHORD_FORMULAS})
     if raw.lower() in lowered:
         return lowered[raw.lower()]

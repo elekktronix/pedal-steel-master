@@ -3,7 +3,7 @@ and inversions from pitch and string sets.
 """
 
 from typing import Dict, List, Optional, Set, Tuple
-from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
+from core.theory import NOTE_TO_SEMITONE, spell_pc
 
 FRANKLIN_GROUPS: Dict[Tuple[int, ...], str] = {
     (3, 4, 5): "Group 1",
@@ -52,7 +52,7 @@ class ChordIdentifier:
         candidates: List[Tuple[int, str, str, str]] = []  # (priority, display_tag, chord_type, root_name)
 
         for root_pc in range(12):
-            root_name = NOTE_NAMES_SHARP[root_pc]
+            root_name = spell_pc(root_pc)  # display spelling follows the global preference
             semitones = {(pc - root_pc) % 12 for pc in pitch_classes}
 
             # A chord MUST contain its root (0) to be identified with this root

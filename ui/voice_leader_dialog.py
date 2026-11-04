@@ -33,7 +33,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import Neck
-from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
+from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, note_names, respell
 from core.voice_leader import ChordProgression, VoiceLeadingConstraints, VoiceLeadingEngine
 from core.voicing_solver import VoicingSolver
 
@@ -157,8 +157,8 @@ class VoiceLeaderDialog(QDialog):
 
         music_l.addWidget(QLabel("Key:"), 0, 0)
         self.combo_key = QComboBox()
-        self.combo_key.addItems(NOTE_NAMES_SHARP + ["Cm", "Fm", "Am", "Dm", "Gm"])
-        self.combo_key.setCurrentText(self.progression.tonal_center)
+        self.combo_key.addItems(note_names() + ["Cm", "Fm", "Am", "Dm", "Gm"])
+        self.combo_key.setCurrentText(respell(self.progression.tonal_center))
         music_l.addWidget(self.combo_key, 0, 1)
 
         music_l.addWidget(QLabel("Time:"), 0, 2)

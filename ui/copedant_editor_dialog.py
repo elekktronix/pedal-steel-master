@@ -34,6 +34,12 @@ from PySide6.QtWidgets import (
 )
 
 from core.models import (
+    CHANGER_LIMIT_RANGE,
+    CHANGER_PRESETS,
+    DEFAULT_CHANGER,
+    changer_label,
+    changer_usage,
+    changer_violations,
     CopedantChange,
     HalfStopRule,
     Neck,
@@ -124,10 +130,8 @@ class CopedantEditorDialog(QDialog):
         self.combo_copedant = QComboBox()
         self.combo_copedant.setMinimumWidth(260)
         if self.guitar:
-            for idx, n in enumerate(self.guitar.necks):
-                self.combo_copedant.addItem(f"{n.name} ({n.string_count} Str)", idx)
-            self.combo_copedant.setCurrentIndex(self.current_neck_idx)
-            self.combo_copedant.currentIndexChanged.connect(self._on_switch_copedant)
+            self._rebuild_copedant_combo()
+            self.combo_copedant.currentIndexChanged.connect(self._on_copedant_combo_changed)
         else:
             self.combo_copedant.addItem(f"{self.neck.name} ({self.neck.string_count} Str)", 0)
         top_bar.addWidget(self.combo_copedant)
@@ -141,6 +145,12 @@ class CopedantEditorDialog(QDialog):
         self.btn_save_profile.setStyleSheet("padding: 5px 12px; font-weight: bold; background-color: #0d6efd; color: white;")
         self.btn_save_profile.clicked.connect(self._save_explicit_profile)
         top_bar.addWidget(self.btn_save_profile)
+
+        self.btn_compare = QPushButton("🔍 Compare to Saved")
+        self.btn_compare.setStyleSheet("padding: 5px 12px; font-weight: bold;")
+        self.btn_compare.setToolTip("Show which chords your unsaved edits add or remove (E-25)")
+        self.btn_compare.clicked.connect(self._compare_to_saved)
+        top_bar.addWidget(self.btn_compare)
 
         top_bar.addStretch()
         root.addLayout(top_bar)
@@ -224,6 +234,36 @@ class CopedantEditorDialog(QDialog):
                 row_idx += 1
 
         vbox.addWidget(box_levers)
+
+        # Changer configuration: most raises / lowers the changer holds per string.
+        box_changer = QGroupBox("Changer Configuration")
+        box_changer.setStyleSheet("QGroupBox { font-weight: bold; }")
+        ch = QHBoxLayout(box_changer)
+        ch.setContentsMargins(10, 8, 10, 8)
+        ch.addWidget(QLabel("Preset:"))
+        self.combo_changer = QComboBox()
+        for raises, lowers in CHANGER_PRESETS:
+            suffix = " (default)" if (raises, lowers) == DEFAULT_CHANGER else ""
+            self.combo_changer.addItem(changer_label(raises, lowers) + suffix, (raises, lowers))
+        self.combo_changer.addItem("Custom", None)
+        self.combo_changer.currentIndexChanged.connect(self._on_changer_preset_changed)
+        ch.addWidget(self.combo_changer)
+        ch.addSpacing(10)
+        ch.addWidget(QLabel("Raises per string:"))
+        self.spin_raises = QSpinBox()
+        self.spin_raises.setRange(*CHANGER_LIMIT_RANGE)
+        self.spin_raises.valueChanged.connect(self._on_changer_limits_changed)
+        ch.addWidget(self.spin_raises)
+        ch.addWidget(QLabel("Lowers per string:"))
+        self.spin_lowers = QSpinBox()
+        self.spin_lowers.setRange(*CHANGER_LIMIT_RANGE)
+        self.spin_lowers.valueChanged.connect(self._on_changer_limits_changed)
+        ch.addWidget(self.spin_lowers)
+        ch.addSpacing(10)
+        self.lbl_changer_status = QLabel("")
+        self.lbl_changer_status.setWordWrap(True)
+        ch.addWidget(self.lbl_changer_status, stretch=1)
+        vbox.addWidget(box_changer)
 
         tools_h = QHBoxLayout()
         tools_h.setSpacing(8)
@@ -655,9 +695,56 @@ class CopedantEditorDialog(QDialog):
             cb.setChecked(lid in self.neck.knee_levers)
             cb.blockSignals(False)
 
+        self._load_changer_controls()
         self._rebuild_matrix_table()
         self._refresh_splits_tab()
         self._refresh_half_stops_tab()
+
+    # -------------------------------------------------------------------------
+    # Changer configuration
+    # -------------------------------------------------------------------------
+    def _load_changer_controls(self):
+        for w in (self.spin_raises, self.spin_lowers, self.combo_changer):
+            w.blockSignals(True)
+        self.spin_raises.setValue(self.neck.changer_raises)
+        self.spin_lowers.setValue(self.neck.changer_lowers)
+        for w in (self.spin_raises, self.spin_lowers, self.combo_changer):
+            w.blockSignals(False)
+        self._select_changer_preset()
+
+    def _select_changer_preset(self):
+        current = (self.neck.changer_raises, self.neck.changer_lowers)
+        row = next((i for i in range(self.combo_changer.count()) if self.combo_changer.itemData(i) == current),
+                   self.combo_changer.count() - 1)  # "Custom"
+        self.combo_changer.blockSignals(True)
+        self.combo_changer.setCurrentIndex(row)
+        self.combo_changer.blockSignals(False)
+
+    def _on_changer_preset_changed(self, _row: int):
+        data = self.combo_changer.currentData()
+        if not data:
+            return  # "Custom": keep the spin boxes as they are
+        self.neck.changer_raises, self.neck.changer_lowers = data
+        self._load_changer_controls()
+        self._rebuild_matrix_table()
+
+    def _on_changer_limits_changed(self, _value: int):
+        self.neck.changer_raises = self.spin_raises.value()
+        self.neck.changer_lowers = self.spin_lowers.value()
+        self._select_changer_preset()
+        self._rebuild_matrix_table()
+
+    def _refresh_changer_status(self, violations) -> None:
+        if not violations:
+            self.lbl_changer_status.setText("✔ Every string fits this changer.")
+            self.lbl_changer_status.setStyleSheet("color: #3fb950; font-weight: bold;")
+            self.lbl_changer_status.setToolTip("")
+            return
+        lines = [v.message for v in violations]
+        more = f" (+{len(lines) - 1} more, hover for all)" if len(lines) > 1 else ""
+        self.lbl_changer_status.setText(f"⚠ Exceeds the changer, Apply is blocked: {lines[0]}{more}")
+        self.lbl_changer_status.setStyleSheet("color: #ff7b72; font-weight: bold;")
+        self.lbl_changer_status.setToolTip("\n".join(lines))
 
     def _on_neck_type_changed(self):
         n_type = self.combo_neck_type.currentText()
@@ -721,12 +808,19 @@ class CopedantEditorDialog(QDialog):
             key=lambda k: lever_order.index(k) if k in lever_order else 99,
         )
 
+        violations = changer_violations(self.neck)
+        self._over_limit = {(c, v.string_number) for v in violations for c in v.controllers}
+        usage = changer_usage(self.neck)
+        self._refresh_changer_status(violations)
+
         headers = ["String", "Open Tuning"]
         for p_id in pedal_keys:
             p_obj = self.neck.pedals[p_id]
             headers.append(p_obj.label if p_obj.label != p_id else p_id)
         for l_id in lever_keys:
             headers.append(l_id)
+        headers.append("Changer ↑/↓")
+        changer_col = len(headers) - 1
 
         self.table.setColumnCount(len(headers))
         self.table.setHorizontalHeaderLabels(headers)
@@ -775,6 +869,15 @@ class CopedantEditorDialog(QDialog):
                 is_even_lane = (l_idx % 2 == 0)
                 cell = self._create_changer_cell(ctrl, s_num, sp.midi_note, delta, is_even_lane, is_pedal=False)
                 self.table.setCellWidget(s_idx, col_offset + l_idx, cell)
+
+            ups, downs = usage.get(s_num, ([], []))
+            over = len(ups) > self.neck.changer_raises or len(downs) > self.neck.changer_lowers
+            lbl_use = QLabel(f"↑{len(ups)}/{self.neck.changer_raises}  ↓{len(downs)}/{self.neck.changer_lowers}")
+            lbl_use.setAlignment(Qt.AlignCenter)
+            lbl_use.setToolTip(f"Raises: {', '.join(ups) or 'none'}\nLowers: {', '.join(downs) or 'none'}")
+            color = "#ff7b72" if over else "#8b949e"
+            lbl_use.setStyleSheet(f"font-weight: bold; font-size: 11px; color: {color};")
+            self.table.setCellWidget(s_idx, changer_col, lbl_use)
 
         self.table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
         self.table.blockSignals(False)
@@ -859,7 +962,11 @@ class CopedantEditorDialog(QDialog):
             bg_color = "#18202d" if is_even_lane else "#141a24"
         else:
             bg_color = "#15241e" if is_even_lane else "#121d18"
-        widget.setStyleSheet(f"background-color: {bg_color}; border-right: 1px solid #2e3545;")
+        if (ctrl.id, s_num) in getattr(self, "_over_limit", set()):
+            widget.setStyleSheet("background-color: #3d1418; border: 2px solid #dc3545;")
+            widget.setToolTip("This pull exceeds the changer configuration for this string.")
+        else:
+            widget.setStyleSheet(f"background-color: {bg_color}; border-right: 1px solid #2e3545;")
 
         h = QHBoxLayout(widget)
         h.setContentsMargins(4, 2, 4, 2)
@@ -1055,6 +1162,23 @@ class CopedantEditorDialog(QDialog):
         self.neck.social_media = self.edit_social.text()
         self._working[self.current_neck_idx] = self.neck
 
+    def saved_neck_for_compare(self) -> Neck:
+        """The saved version of the neck being edited, migrated like the working copy so a
+        legacy rename (VL -> LKV) is not reported as a change (E-25)."""
+        saved = self.guitar.necks[self.current_neck_idx] if self.guitar else self.original_neck
+        saved = deepcopy(saved)
+        migrate_legacy_ids(saved)
+        migrate_half_stop_tokens(saved)
+        return saved
+
+    def _compare_to_saved(self):
+        from ui.copedant_compare_dialog import CopedantCompareDialog
+
+        self._sync_ui_to_neck()
+        dlg = CopedantCompareDialog(self.saved_neck_for_compare(), deepcopy(self.neck), parent=self)
+        dlg.exec()
+        dlg.deleteLater()
+
     def _append_neck_and_switch(self, new_neck: Neck):
         """Adds a neck to the guitar immediately (flagged via guitar_changed) and edits it."""
         self.guitar.necks.append(new_neck)
@@ -1062,12 +1186,9 @@ class CopedantEditorDialog(QDialog):
         new_idx = len(self.guitar.necks) - 1
         self._working[new_idx] = deepcopy(new_neck)
 
-        self.combo_copedant.blockSignals(True)
-        self.combo_copedant.addItem(f"{new_neck.name} ({new_neck.string_count} Str)", new_idx)
-        self.combo_copedant.setCurrentIndex(new_idx)
-        self.combo_copedant.blockSignals(False)
-
         self.current_neck_idx = new_idx
+        self._rebuild_copedant_combo()
+
         self.neck = self._working[new_idx]
         self.setWindowTitle(f"Copedant Setup & Tuning Editor - {self.neck.name}")
         self._load_neck_data()
@@ -1132,6 +1253,51 @@ class CopedantEditorDialog(QDialog):
                 self._persist_active_guitar()
         QMessageBox.information(self, "Profile Saved", f"Successfully saved '{safe_name}' to disk.")
 
+    def _rebuild_copedant_combo(self):
+        """Necks of the guitar, then the saved user profiles that are not open as a neck yet (D-42).
+        Item data: ("neck", index) or ("profile", name)."""
+        combo = self.combo_copedant
+        combo.blockSignals(True)
+        combo.clear()
+        for idx, n in enumerate(self.guitar.necks):
+            marker = "📁 " if n.source_profile else ""
+            combo.addItem(f"{marker}{n.name} ({n.string_count} Str)", ("neck", idx))
+        linked = {n.source_profile for n in self.guitar.necks if n.source_profile}
+        profiles = [p for p in ProfileManager.list_user_profiles() if p not in linked]
+        if profiles:
+            combo.addItem("─── Saved User Profiles ───", None)
+            combo.model().item(combo.count() - 1).setEnabled(False)
+            for name in profiles:
+                combo.addItem(f"📁 {name}", ("profile", name))
+        sel = next((i for i in range(combo.count()) if combo.itemData(i) == ("neck", self.current_neck_idx)), 0)
+        combo.setCurrentIndex(sel)
+        combo.blockSignals(False)
+
+    def _on_copedant_combo_changed(self, _row: int):
+        data = self.combo_copedant.currentData()
+        if not data:
+            return
+        kind, value = data
+        if kind == "neck":
+            self._on_switch_copedant(value)
+        else:
+            self._open_profile_in_editor(value)
+
+    def _open_profile_in_editor(self, name: str):
+        """Loads a saved profile as a new neck entry (same rule as MainWindow._load_named_profile)."""
+        try:
+            neck = ProfileManager.load_user_profile(name)
+        except Exception as e:  # noqa: BLE001 - surface any read/parse error to the user
+            neck = None
+            QMessageBox.critical(self, "Profile Error", f"Failed to load profile '{name}':\n{e}")
+        if neck is None:
+            self._rebuild_copedant_combo()
+            return
+        self._sync_ui_to_neck()
+        migrate_legacy_ids(neck)
+        migrate_half_stop_tokens(neck)
+        self._append_neck_and_switch(neck)
+
     def _on_switch_copedant(self, idx: int):
         if self.guitar and 0 <= idx < len(self.guitar.necks):
             # Keep unapplied edits of the neck we are leaving (D-22).
@@ -1157,8 +1323,36 @@ class CopedantEditorDialog(QDialog):
             except Exception:
                 log.exception("Failed to persist active guitar setup")
 
+    def _check_changer_limits(self) -> bool:
+        """Blocks Apply while any neck edited in this session needs more raises/lowers per string
+        than its changer configuration holds. Shows the problems and switches to that neck."""
+        pending = list(self._working.items()) if self.guitar else [(self.current_neck_idx, self.neck)]
+        if self.guitar and self.current_neck_idx not in self._working:
+            pending.append((self.current_neck_idx, self.neck))
+        for idx, neck in pending:
+            violations = changer_violations(neck)
+            if not violations:
+                continue
+            if self.guitar and idx != self.current_neck_idx:
+                self._on_switch_copedant(idx)
+                self._rebuild_copedant_combo()
+            self.tabs.setCurrentWidget(self.tab_matrix)
+            details = "\n".join(f"• {v.message}" for v in violations)
+            QMessageBox.warning(
+                self,
+                "Changer Configuration Exceeded",
+                f"'{neck.name}' cannot be applied: its changer is set to "
+                f"{changer_label(neck.changer_raises, neck.changer_lowers)}.\n\n{details}\n\n"
+                "Remove a pull from these strings, or change the Changer Configuration if your "
+                "guitar's changer has more fingers.",
+            )
+            return False
+        return True
+
     def _apply_and_close(self):
         self._sync_ui_to_neck()
+        if not self._check_changer_limits():
+            return
 
         if self.guitar:
             # Apply every neck edited in this session, not just the visible one.

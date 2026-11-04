@@ -75,8 +75,8 @@ class ProgressionSequencerWidget(QWidget):
         arp_layout.addWidget(QLabel("<b>Permutation:</b>"))
 
         self.combo_perm_arp = QComboBox()
-        for pid, (p_str, name, _) in FRANKLIN_24_PERMUTATIONS.items():
-            self.combo_perm_arp.addItem(f"#{pid:02d}: {p_str}", pid)
+        for pid, (p_str, notes, *_) in FRANKLIN_24_PERMUTATIONS.items():
+            self.combo_perm_arp.addItem(f"#{pid:02d}: {p_str} ({notes})", pid)
         self.combo_perm_arp.setCurrentIndex(1)  # #02: T-I-M-T
         arp_layout.addWidget(self.combo_perm_arp, stretch=1)
 

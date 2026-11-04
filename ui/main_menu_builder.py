@@ -52,8 +52,8 @@ class MainMenuBuilder:
         action_stance_chords.triggered.connect(main_window._open_stance_chord_inspector)
         view_menu.addAction(action_stance_chords)
 
-        action_voice_pop = QAction("🔍 Chord Voicing Finder Window", main_window)
-        action_voice_pop.triggered.connect(main_window._toggle_voicing_popout)
+        action_voice_pop = QAction("🔍 Chord Finder (Chord Atlas: Find a chord)", main_window)
+        action_voice_pop.triggered.connect(main_window._open_chord_finder)
         view_menu.addAction(action_voice_pop)
 
         action_scale_pop = QAction("🎼 Scale Finder & Builder Window", main_window)
@@ -80,6 +80,14 @@ class MainMenuBuilder:
         action_splits.triggered.connect(main_window._open_splits_manager)
         copedant_menu.addAction(action_splits)
 
+        action_compare = QAction("&Compare Copedants...", main_window)
+        action_compare.triggered.connect(main_window._open_copedant_compare)
+        copedant_menu.addAction(action_compare)
+
+        action_atlas = QAction("Chord &Atlas (all chords on this copedant)...", main_window)
+        action_atlas.triggered.connect(main_window._open_chord_atlas)
+        copedant_menu.addAction(action_atlas)
+
         main_window.action_c6_franklin_offset = QAction("Offset C6 Pedals +1 (Franklin P1)", main_window, checkable=True)
         main_window.action_c6_franklin_offset.triggered.connect(main_window._toggle_c6_menu_pedal_offset)
         copedant_menu.addAction(main_window.action_c6_franklin_offset)
@@ -101,6 +109,25 @@ class MainMenuBuilder:
         main_window.action_disp_notes.triggered.connect(lambda: main_window._set_display_mode("notes"))
         main_window.disp_group.addAction(main_window.action_disp_notes)
         display_menu.addAction(main_window.action_disp_notes)
+
+        spelling_menu = pref_menu.addMenu("♯/♭ Note Spelling")
+        main_window.spelling_group = QActionGroup(main_window)
+        main_window.spelling_group.setExclusive(True)
+        current_spelling = main_window.settings.get("note_spelling", "sharps")
+        for pref, label in (("sharps", "Sharps (C#, D#, F#, G#, A#)"), ("flats", "Flats (Db, Eb, Gb, Ab, Bb)")):
+            act = QAction(label, main_window, checkable=True)
+            act.setChecked(pref == current_spelling)
+            act.triggered.connect(lambda _=False, p=pref: main_window._set_note_spelling(p))
+            main_window.spelling_group.addAction(act)
+            spelling_menu.addAction(act)
+        spelling_menu.addSeparator()
+        main_window.action_key_aware_spelling = QAction(
+            "Key-aware tools spell by key signature (Circle of Fifths, Triads Over Chord)", main_window, checkable=True)
+        main_window.action_key_aware_spelling.setToolTip(
+            "On: diatonic and triad names follow the key (Bb in F, A# in B). Off: they use the sharps/flats choice above.")
+        main_window.action_key_aware_spelling.setChecked(main_window.settings.get("key_aware_spelling", True))
+        main_window.action_key_aware_spelling.toggled.connect(main_window._set_key_aware_spelling)
+        spelling_menu.addAction(main_window.action_key_aware_spelling)
 
         temp_menu = pref_menu.addMenu("🎵 Audio Temperament")
         main_window.temp_group = QActionGroup(main_window)

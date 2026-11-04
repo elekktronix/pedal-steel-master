@@ -13,7 +13,7 @@ from core.chord_identifier import ChordIdentifier
 from core.models import Neck
 from core.resolver import FretboardResolver
 from core.stances import detect_roles, grip_matches_chord, is_c6_neck, resolve_stance
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
+from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, respell
 
 ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
     "A#": "Bb",
@@ -26,7 +26,7 @@ _FAMILY_TO_CHORD_TYPE: Dict[str, str] = {"Major 6": "Major 6th", "Minor 6": "Min
 
 
 def format_chord_root(name: str) -> str:
-    return ENHARMONIC_FLAT_NAMES.get(name, name)
+    return respell(name)  # global sharps/flats preference
 
 
 def _safe_extract_root_and_quality(chord_label: str) -> Tuple[str, str]:

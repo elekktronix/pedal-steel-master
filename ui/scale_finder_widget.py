@@ -23,7 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.models import Neck
 from core.scale_engine import BoxNote, ScaleBox, ScaleSolver
-from core.theory import NOTE_NAMES_SHARP, SCALE_FORMULAS
+from core.theory import SCALE_FORMULAS, note_names
 
 
 class ScaleFinderWidget(QWidget):
@@ -58,7 +58,7 @@ class ScaleFinderWidget(QWidget):
         top_bar = QHBoxLayout()
         top_bar.addWidget(QLabel("<b>Root:</b>"))
         self.root_combo = QComboBox()
-        self.root_combo.addItems(NOTE_NAMES_SHARP)
+        self.root_combo.addItems(note_names())
         self.root_combo.setCurrentText("G")
         self.root_combo.currentIndexChanged.connect(self._on_combo_changed)
         top_bar.addWidget(self.root_combo)

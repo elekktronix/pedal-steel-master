@@ -15,7 +15,7 @@ import math
 import sys
 import threading
 import time
-from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Union
+from typing import TYPE_CHECKING, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:  # pragma: no cover
     from core.models import Neck
@@ -29,6 +29,17 @@ else:
 
 STRING_CHANNELS: List[int] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 14]
 SEQUENCE_CHANNEL = 15
+PERCUSSION_CHANNEL = 9  # GM drums: metronome clicks only, never a string
+
+# Metronome click sounds: name -> (accent GM drum note, normal GM drum note)
+CLICK_SOUNDS: Dict[str, Tuple[int, int]] = {
+    "Woodblock": (76, 77),
+    "Claves": (75, 75),
+    "Side Stick": (37, 37),
+    "Cowbell": (56, 56),
+    "Closed Hi-Hat": (42, 42),
+    "Metronome Bell": (34, 33),
+}
 ALL_CHANNELS: List[int] = STRING_CHANNELS + [SEQUENCE_CHANNEL]
 
 
@@ -342,6 +353,18 @@ class MidiAudioEngine:
 
         self._scheduler.schedule(0, _start)
         return True
+
+    def play_click(self, accent: bool = False, sound: str = "Woodblock", velocity: int = 110):
+        """Metronome click on the GM percussion channel. It goes through the same scheduler as the
+        notes, so a click and a note queued together sound together (unlike a sound-card sample)."""
+        if not self._opened:
+            return
+        hi, lo = CLICK_SOUNDS.get(sound, CLICK_SOUNDS["Woodblock"])
+        note = hi if accent else lo
+        vel = min(127, velocity + 15) if accent else velocity
+        ch = PERCUSSION_CHANNEL
+        self._scheduler.schedule(0, lambda: self._send((0x90 | ch) | (note << 8) | (vel << 16)))
+        self._scheduler.schedule(0.08, lambda: self._send((0x80 | ch) | (note << 8)))
 
     def play_scale_sequence(self, pitches: List[int], delay: float = 0.38, velocity: int = 95):
         """Plays notes one after another on the sequence channel, releasing each previous note."""

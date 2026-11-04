@@ -86,6 +86,17 @@ class AudioSchedulerTests(unittest.TestCase):  # E-11 / D-35
         last_on = max(i for i, e in enumerate(events) if e[0] == "on")
         self.assertFalse([e for e in events[last_on + 1:] if e[0] == "bend"])
 
+    def test_click_uses_percussion_channel(self):  # permutation trainer metronome
+        from core.audio import CLICK_SOUNDS, PERCUSSION_CHANNEL
+
+        self.engine.play_click(accent=True, sound="Woodblock")
+        self.engine.play_click(accent=False, sound="Woodblock")
+        self.engine.wait_idle()
+        ons = [(ch, note) for kind, ch, note, _ in _decode(self.msgs) if kind == "on"]
+        hi, lo = CLICK_SOUNDS["Woodblock"]
+        self.assertEqual(ons, [(PERCUSSION_CHANNEL, hi), (PERCUSSION_CHANNEL, lo)])
+        self.assertNotIn(PERCUSSION_CHANNEL, [channel_for_string(s) for s in range(1, 15)])
+
     def test_scale_sequence_releases_notes(self):
         self.engine.play_scale_sequence([60, 62, 64], delay=0.01)
         self.engine.wait_idle()
@@ -234,6 +245,47 @@ class MainWindowFeatureTests(unittest.TestCase):
         finally:
             w.close()
 
+    def test_triad_grip_sets_target_and_stance(self):  # E-19
+        w = self._window()
+        try:
+            w._on_triad_grip_selected(3, {"P1"}, {6, 5, 4}, "G", "Dominant 9th")
+            self.assertEqual((w.harmonic_panel.get_root(), w.harmonic_panel.get_chord_type()), ("G", "Dominant 9th"))
+            self.assertEqual((w.canvas.bar_fret, w.canvas.engaged_levers, w.canvas.active_pocket), (3, {"P1"}, {6, 5, 4}))
+            self.assertEqual(w.lever_panel.active_controllers, {"P1"})
+        finally:
+            w.close()
+
+    def test_permutation_trainer_is_modeless_and_follows_fretboard(self):
+        w = self._window()
+        try:
+            w._open_permutation_trainer()
+            dlg = w._perm_trainer
+            self.assertFalse(dlg.isModal())
+            self.assertEqual(w.canvas.active_pocket, {8, 7, 6, 5})  # opened on the book's strings
+            self.assertEqual(set(dlg.lane_index), {8, 7, 6, 5})
+
+            w.apply_stance(3, {"P1"}, {6, 5, 4, 3}, play=False)  # change the main fretboard
+            self.assertEqual(set(dlg.lane_index), {6, 5, 4, 3})
+            self.assertEqual({e.string_number for e in dlg.events}, {6, 5, 4, 3})
+
+            dlg.combo_click.setCurrentText("Claves")
+            w.audio.calls.clear()
+            dlg._toggle_workout()  # first tick plays immediately: click, then the note
+            names = [c[0] for c in w.audio.calls]
+            self.assertEqual(names[:2], ["play_click", "note"])
+            self.assertEqual(w.audio.calls[0][2], {"accent": True, "sound": "Claves"})
+            self.assertEqual(dlg.timer.interval(), 600)
+            dlg.spin_tempo.setValue(200)  # tempo applies while running
+            self.assertEqual(dlg.timer.interval(), 300)
+            self.assertEqual(w.settings["perm_click_sound"], "Claves")
+
+            w._open_permutation_trainer()  # re-opening reuses the same window
+            self.assertIs(w._perm_trainer, dlg)
+            dlg.close()
+            self.assertFalse(dlg.timer.isActive())
+        finally:
+            w.close()
+
     def test_light_theme_restyles_inline_widgets(self):  # E-13
         w = self._window()
         try:
@@ -245,6 +297,114 @@ class MainWindowFeatureTests(unittest.TestCase):
             self.assertEqual(w.btn_pop_chord.styleSheet(), dark_qss)
         finally:
             w.close()
+
+
+class CompareAndSpellingWindowTests(unittest.TestCase):  # E-25 follow-ups
+    setUp = MainWindowFeatureTests.setUp
+    tearDown = MainWindowFeatureTests.tearDown
+    _window = MainWindowFeatureTests._window
+
+    def test_compare_window_is_modeless_and_follows_active_neck(self):
+        from copy import deepcopy
+
+        w = self._window()
+        base_idx = w.current_neck_idx
+        copy = deepcopy(w.guitar.necks[base_idx])
+        copy.name = copy.name + " copy"
+        copy.knee_levers[sorted(copy.knee_levers)[0]].changes[3] = 1
+        w.guitar.necks.append(copy)
+        w._open_copedant_compare()
+        dlg = w._compare_dlg
+        self.assertIsNotNone(dlg)
+        self.assertFalse(dlg.isModal())
+        self.assertEqual(dlg.combo_mod.currentData(), len(w.guitar.necks) - 1)
+        w._open_copedant_compare()  # second open reuses the window
+        self.assertIs(w._compare_dlg, dlg)
+        # Switching the active neck in the main window updates the dialog.
+        w._select_copedant_index(len(w.guitar.necks) - 1)
+        self.assertEqual(dlg.active_neck_idx, len(w.guitar.necks) - 1)
+        self.assertTrue(dlg.can_apply(gained=True))
+        # A lost way switches back to the baseline and applies the stance there.
+        dlg.activate_neck_requested.emit(base_idx)
+        self.assertEqual(w.current_neck_idx, base_idx)
+        self.assertEqual(dlg.active_neck_idx, base_idx)
+        dlg.close()
+
+    def test_chord_atlas_is_modeless_and_follows_neck_and_pocket(self):  # E-27
+        from core.chord_atlas import GRIP_SOURCE_CURRENT
+
+        w = self._window()
+        w._open_chord_atlas()
+        dlg = w._atlas_dlg
+        self.assertFalse(dlg.isModal())
+        self.assertIs(dlg.neck, w.guitar.necks[w.current_neck_idx])
+        c6_idx = next(i for i, n in enumerate(w.guitar.necks) if n.name == "10-String C6")
+        w._select_copedant_index(c6_idx)
+        self.assertIs(dlg.neck, w.guitar.necks[c6_idx])  # follows the active neck
+        dlg.set_grip_source(GRIP_SOURCE_CURRENT)
+        w.apply_stance(0, set(), {7, 6, 5}, play=False)  # pocket on the fretboard
+        self.assertEqual(dlg.current_pocket, {7, 6, 5})
+        self.assertTrue(dlg.entries)
+        self.assertTrue(all(s.strings == (7, 6, 5) for e in dlg.entries for s in e.sightings))
+        dlg.close()
+
+    def test_chord_finder_opens_atlas_find_mode(self):  # E-28
+        from ui.chord_atlas_dialog import MODE_FIND
+
+        w = self._window()
+        self.assertFalse(hasattr(w, "voicing_finder"))
+        w.harmonic_panel.set_target("A", "Minor")
+        w.harmonic_panel.find_voicings_requested.emit()
+        dlg = w._atlas_dlg
+        self.assertEqual(dlg.mode, MODE_FIND)
+        self.assertEqual((dlg.combo_find_root.currentText(), dlg.combo_find_type.currentText()), ("A", "Minor"))
+        self.assertTrue(dlg.positions)
+        dlg._on_position_double_clicked(0)
+        p = dlg.positions[0]
+        self.assertEqual(w.canvas.bar_fret, p.fret)
+        self.assertEqual(w.canvas.active_pocket, set(p.sighting.strings))
+        self.assertEqual((w.harmonic_panel.get_root(), w.harmonic_panel.get_chord_type()), ("A", "Minor"))
+        w._open_chord_finder()  # reuses the same window
+        self.assertIs(w._atlas_dlg, dlg)
+        dlg.close()
+
+    def test_note_spelling_preference_is_global(self):
+        from core.theory import get_accidental_preference, set_accidental_preference
+
+        self.addCleanup(set_accidental_preference, "sharps")
+        w = self._window()
+        w.harmonic_panel.set_target("D#", "Major")
+        w._set_note_spelling("flats")
+        self.assertEqual(get_accidental_preference(), "flats")
+        self.assertEqual(w.settings["note_spelling"], "flats")
+        self.assertEqual(w.harmonic_panel.get_root(), "Eb")
+        names = {s.string_number: s.active_note_name for s in w.canvas.active_states}
+        self.assertTrue(names[2].startswith("Eb") or names[2].startswith("E"), names)
+        w.harmonic_panel.set_target("A#", "Minor")  # sharp input lands on the flat item
+        self.assertEqual(w.harmonic_panel.get_root(), "Bb")
+        w._set_note_spelling("sharps")
+        self.assertEqual(w.harmonic_panel.get_root(), "A#")
+
+    def test_circle_keeps_key_names_and_key_aware_toggle(self):
+        from core.theory import is_key_aware_spelling, set_accidental_preference, set_key_aware_spelling
+
+        self.addCleanup(set_accidental_preference, "sharps")
+        self.addCleanup(set_key_aware_spelling, True)
+        w = self._window()
+        cw = w.circle_widget
+        cw.set_key_center("C#")                     # any spelling maps onto the wheel's key name
+        self.assertEqual(cw.combo_key.currentText(), "Db")
+        w._set_note_spelling("sharps")
+        self.assertEqual(cw.combo_key.currentText(), "Db")   # traditional circle names are not respelled
+        self.assertTrue(w.action_key_aware_spelling.isChecked())
+        w.action_key_aware_spelling.setChecked(False)
+        self.assertFalse(is_key_aware_spelling())
+        self.assertFalse(w.settings["key_aware_spelling"])
+        labels = [d["button"].text() for d in cw.family_buttons_data]
+        self.assertTrue(any("C#" in s for s in labels), labels)   # I of Db now spelled C#
+        cw.highlight_chord("C#", "Major")
+        cw.set_key_center("Db")
+        self.assertTrue(any(d["root"] == "C#" for d in cw.family_buttons_data))
 
 
 if __name__ == "__main__":

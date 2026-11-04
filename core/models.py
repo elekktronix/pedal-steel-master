@@ -140,6 +140,9 @@ class Neck:
     social_media: str = ""
     # Name of the user profile file this neck was loaded from / is linked to ("" = not a profile).
     source_profile: str = ""
+    # Changer configuration: the most raises / lowers the changer can hold on one string.
+    changer_raises: int = 3
+    changer_lowers: int = 3
 
     def to_dict(self) -> dict:
         return {
@@ -156,6 +159,7 @@ class Neck:
             "knee_levers": {k: v.to_dict() for k, v in self.knee_levers.items()},
             "half_stops": [h.to_dict() for h in getattr(self, "half_stops", [])],
             "splits": [s.to_dict() for s in getattr(self, "splits", [])],
+            "changer": {"raises": int(self.changer_raises), "lowers": int(self.changer_lowers)},
         }
 
     @classmethod
@@ -185,6 +189,8 @@ class Neck:
             author_bio=data.get("author_bio", ""),
             social_media=data.get("social_media", ""),
             source_profile=str(data.get("source_profile", "")),
+            changer_raises=int(data.get("changer", {}).get("raises", DEFAULT_CHANGER[0])),
+            changer_lowers=int(data.get("changer", {}).get("lowers", DEFAULT_CHANGER[1])),
         )
 
     @classmethod
@@ -266,6 +272,56 @@ class Neck:
 
 
 HALF_SUFFIX = "_HALF"
+
+
+# ---------------------------------------------------------------------------
+# Changer configuration
+# ---------------------------------------------------------------------------
+# (raises, lowers) per string. Each pedal or lever that raises a string needs its own raise
+# finger on that string's changer; each one that lowers needs a lower finger. Half-stops and
+# split tuning screws work on an existing pull, so they need no extra finger.
+DEFAULT_CHANGER: Tuple[int, int] = (3, 3)
+CHANGER_PRESETS: List[Tuple[int, int]] = [(3, 3), (4, 2), (3, 2), (2, 2), (4, 3), (4, 4)]
+CHANGER_LIMIT_RANGE = (0, 8)
+
+
+def changer_label(raises: int, lowers: int) -> str:
+    return f"{raises} up – {lowers} down"
+
+
+@dataclass
+class ChangerViolation:
+    string_number: int
+    direction: str            # "raise" or "lower"
+    controllers: List[str]    # the controllers pulling that way on this string
+    limit: int
+
+    @property
+    def message(self) -> str:
+        n = len(self.controllers)
+        return (f"String {self.string_number}: {n} {self.direction}s ({', '.join(self.controllers)}), "
+                f"the changer holds {self.limit}")
+
+
+def changer_usage(neck: "Neck") -> Dict[int, Tuple[List[str], List[str]]]:
+    """string number -> (controllers that raise it, controllers that lower it)."""
+    usage: Dict[int, Tuple[List[str], List[str]]] = {sp.string_number: ([], []) for sp in neck.open_tuning}
+    for ctrl in list(neck.pedals.values()) + list(neck.knee_levers.values()):
+        for s_num, delta in ctrl.changes.items():
+            if s_num in usage and delta:
+                usage[s_num][0 if delta > 0 else 1].append(ctrl.id)
+    return usage
+
+
+def changer_violations(neck: "Neck") -> List[ChangerViolation]:
+    """Every string that needs more raises or lowers than the neck's changer configuration holds."""
+    out: List[ChangerViolation] = []
+    for s_num, (ups, downs) in sorted(changer_usage(neck).items()):
+        if len(ups) > neck.changer_raises:
+            out.append(ChangerViolation(s_num, "raise", ups, neck.changer_raises))
+        if len(downs) > neck.changer_lowers:
+            out.append(ChangerViolation(s_num, "lower", downs, neck.changer_lowers))
+    return out
 
 # Knee lever IDs removed by the copedant editor on load (legacy variants).
 RETIRED_KNEE_LEVER_IDS = {"VL2", "LKR2", "RKL2", "VR", "VR2", "RKRHS"}

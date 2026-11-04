@@ -7,13 +7,16 @@ Each engine is a class of `@classmethod`s with no instance state. **Copedant-awa
 | `stances` | `detect_roles`, `resolve_stance`, `grip_matches_chord`, `is_c6_neck` | role map / ID set / bool | ✅ (it *is* the adapter) | star map, relative moves, scale, pearls, presets, audio |
 | `theory` | formulas, `note_to_midi`, `get_nashville_chord_symbol`, `to_root_name` | dicts / str | n/a | everything |
 | `chord_identifier.ChordIdentifier` | `identify_voicing(pitches, bass, show_inversion, grip)` | `(display_tag, family)` | n/a (pitch-only) | canvas, relative_moves, stance inspector |
-| `voicing_solver.VoicingSolver` | `find_all_voicings`, `find_circle_neighbors`, `get_triad_substitution`, `classify_movement` | `List[VoicingMatch]`, `List[NeighborVoicing]` | ✅ | voicing dialog, circle widget, voice leader, main |
+| `voicing_solver.VoicingSolver` | `find_all_voicings`, `find_circle_neighbors`, `get_triad_substitution`, `classify_movement` | `List[VoicingMatch]`, `List[NeighborVoicing]` | ✅ | circle widget, voice leader, triad explorer, main (`find_circle_neighbors` is no longer used by the UI) |
 | `voice_leader.VoiceLeadingEngine` | `solve_progression(neck, prog, constraints)` | one `Optional[VoicingMatch]` per measure | ✅ | voice leader dialog |
 | `scale_engine.ScaleSolver` | `find_scale_boxes(neck, root, scale, span, max_fret)` | `List[ScaleBox]` (≤5) | ✅ (role combos) | scale finder |
 | `relative_moves.RelativeMovesEngine` | `get_all_same_fret_chords`, `get_same_fret_diatonic_hub`, `get_e9_relative_movements`, `get_c6_relative_movements` | `List[RelativeMoveOption]` | ✅ (role stances, verified) | relative moves widget |
 | `star_map_engine.StarMapEngine` | `calculate_landmarks(root, type, neck)` | `List[StarMapLandmark]` | ✅ (role stances, verified) | main ribbon, star-map dialog, flashcards |
 | `pearls_engine.PearlsEngine` | `generate_scale_run(key, track, scale, max_fret, neck)` | `List[PearlStep]` | ✅ | pearls dialog |
 | `flashcard_engine.FlashcardEngine` | `generate_prompt(time_limit, root, neck)`, `evaluate_attempt` | `FlashcardPrompt`, `DrillResult` | ✅ (via star map) | flashcard dialog |
+| `triad_explorer` (E-19) | `explore(root, chord_type)`, `find_triad_grips(neck, triad)`, `grip_intervals_over_chord` | `List[TriadOverChord]`, `List[VoicingMatch]` | ✅ (grips re-checked with `grip_matches_chord`) | triad explorer dialog |
+| `copedant_compare` (E-25) | `diff_copedants(base, mod)`, `compare_copedants(base, mod)`, `scan_chords(neck)` | `List[CopedantDiffItem]`, `CopedantComparison` | ✅ (resolver; every reported way re-checked with `grip_matches_chord`) | compare dialog (menu + copedant editor) |
+| `chord_atlas` (E-27/E-28) | `build_atlas(neck)`, `filter_atlas`, `by_stance`, `coverage`, `grips_for_config`, `find_chord`, `sort_positions`, `find_neighbors` | `ChordAtlas` / `List[AtlasEntry]` | ✅ (compare scan; every way checked with `grip_matches_chord` in tests) | chord atlas dialog |
 | `permutation_engine.PermutationEngine` | `generate_sequence(perm_id, strings, cycles)` | `List[PickEvent]` | n/a | permutation trainer, sequencer arpeggiate |
 | `tab_generator.TabGenerator` | `generate_ascii_tab(string_count, steps)` | str | n/a | sequencer |
 | `progression_presets` | `PROGRESSION_PRESETS`, `resolve_preset_steps(preset, neck)` | presets with role tokens → steps with IDs | ✅ | sequencer |
@@ -50,8 +53,9 @@ Each engine is a class of `@classmethod`s with no instance state. **Copedant-awa
 
 ## theory.py
 
+- **Global display spelling:** `set_accidental_preference("sharps"|"flats")` (from the `note_spelling` setting) drives `note_names()`, `spell_pc()`, `respell()` and the default of `midi_to_note_name()`. The resolver's `active_note_name`, the `ChordIdentifier` root, relative-moves and star-map roots (`format_chord_root` / `format_root`), pearls, the compare engine and the root dropdowns all follow it. By default, key-aware spellers keep the theory spelling: the circle of fifths spells diatonic chords by key signature, and the triad explorer spells by the backing root's accidental. `set_key_aware_spelling(False)` (setting `key_aware_spelling`) makes them use the global preference too. The circle wheel and its key dropdown always keep the traditional key names (`F#`, `Db`, `Ab`…) and compare roots **by pitch class**, so either spelling highlights correctly. Engines accept either spelling through `NOTE_TO_SEMITONE`.
 - `NOTE_TO_SEMITONE` accepts sharps, flats and B#/E#/Cb/Fb. `to_root_name(name, spellings)` respells any enharmonic root into a given spelling list. UI combos use it, so flats are accepted everywhere.
-- `CHORD_FORMULAS` has 14 chords (now including `Half-Diminished` and `6/9`). The labels are not identical to `INTERVAL_MAP`: Sus4 uses `"4"` and Dim7 uses `"bb7"`.
+- `CHORD_FORMULAS` has 24 chords. E-18 added `Major 9th`, `Minor 9th`, `Dominant 11th` (9sus4, no 3rd), `Dominant 13th` (no 11), `Dominant 13sus4`, `Dominant 7b9`, `Dominant 7#9`, `Dominant 7b5`, `Dominant 7#5` and `Major 7th #5`. The labels are not identical to `INTERVAL_MAP`: Sus4 uses `"4"`, Dim7 uses `"bb7"`, and the extensions use `"9"`, `"b9"`, `"#9"`, `"11"` and `"13"`. Every key needs an entry in `CHORD_SYMBOL_SUFFIX` (display suffix such as `"13sus4"`) and in `_NASHVILLE_FAMILY_SUFFIX`; `voice_leader.CHORD_TYPE_MAP` has the short aliases (`maj9`, `13`, `7#9`…). Tests enforce this. The canvas colors 9/11/13 labels **before** its `"3" in lbl` test, so `"13"` isn't colored as a 3rd.
 - `SCALE_FORMULAS` has 12 scales (semitone → degree label `"1"`…`"7"`).
 - `get_nashville_chord_symbol(label, key, family=None)` prefers the chord **family** (ChordIdentifier family or CHORD_FORMULAS key). Otherwise it parses the text after the root by prefix: `maj`→"", `m7b5`→ø, `dim`→°, `aug`→+, `sus`→sus, `m`/`min`→"-", `dom`/`7`/`9`/`11`/`13`→⁷. The canvas passes the family.
 
@@ -68,7 +72,7 @@ It tries all 12 roots. A root qualifies only if its pitch class is present. Exac
 4. Score = 14·unique + 5·has R + 6·has 3rd + 3·(no doubled tones) − ergonomic penalty.
 
 Other functions:
-- `find_circle_neighbors` locates the key **by pitch class** (so C#, D#, G#, A# and Gb work), then searches IV, V, V7, vi and ii.
+- `find_circle_neighbors` (the Chord Atlas radar) locates the key **by pitch class** (so C#, D#, G#, A# and Gb work), then searches IV, V, V7, vi and ii.
 - `get_triad_substitution`: Franklin triad-over-root table.
 - Unused helpers still present: `get_c6_open_chords` and `get_newman_minor_anchors` (the latter duplicates star-map logic).
 
@@ -109,11 +113,55 @@ Shape tables use role tokens; the base fret is given per tuning and quality:
 - `fret_offset` always means "frets above the base shape".
 - With `neck=None`, the standard E9 preset is used.
 
+## triad_explorer.py (E-19; Franklin *Intervals* pp. 20–28)
+
+- Supported backing types are listed in `CHORD_FAMILY` (major, dominant and minor families); any other type returns `[]`.
+- **Groups:**
+  - *Diatonic:* triads of the parent scale (Ionian, Mixolydian or Dorian).
+  - *From the 3rd & 5th:* major, minor and diminished triads on the chord's 3rd and 5th.
+  - *Altered* (dominants only): triads of the melodic minor a half-step above the root.
+  - Duplicates keep their first group.
+- **Sounds like:** the smallest `CHORD_FORMULAS` type, at most 2 extra tones, that contains root + implied tones (the backing chord's 7th; b3 if minor) + the triad. Ties go to the same family. Dominant backings only accept dominant types; otherwise, with a b7 and no natural 7, they get a composite name (`G7b5#9`). Anything else becomes a slash chord (`C/G`). The tests pin the book's examples (Dm over G7 → G9, Abm → G7#5b9, B over G → Gmaj7#5…).
+- **Spelling:** follows the backing root's own accidental. Naturals use the parent key's signature; altered triads use flats.
+- **Grips:** `find_triad_grips` runs `VoicingSolver.find_all_voicings` for the triad. It keeps 3-string grips that pass `grip_matches_chord`, takes the 40 best by score and returns them in fret order.
+- **Dialog flow:** clicking a grip in the dialog emits `(fret, controllers, strings, root, type)`. MainWindow sets the harmonic target to the "sounds like" chord when it has a formula (the triad itself otherwise), so the canvas labels the tones over the backing chord, then calls `apply_stance`.
+
+## copedant_compare.py (E-25)
+
+- **Diff:** `diff_copedants` matches controllers by **ID** (labels are ignored). It produces one `CopedantDiffItem` per:
+  - added or removed controller;
+  - added, removed or changed pull (per string);
+  - active split (keyed by string + controller set);
+  - active half-stop (controller + string);
+  - re-tuned, added or removed string.
+
+  `apply_item(base, modified, item)` returns a copy of the baseline with only that item applied.
+- **Scan:** every stance moves as a unit, so the scan runs once at **fret 0** and stores roots as pitch classes; the display transposes them. Stances are `VoicingSolver.candidate_stances` (ergonomic), plus an `<ID>_HALF` variant for each controller with an active half-stop rule. Grips are every 3- and 4-string set within a 5-string span (`all_grips`).
+- **Match rule:** the grip's pitch-class set must equal a `CHORD_FORMULAS` set exactly, with the root present. When no exact spelling exists for any root, a no-5th shell of a chord with 4 or more tones is also accepted (`is_shell`), provided it has `min(#tones, #strings)` distinct tones. A set that spells two chords (C6 = Am7) is reported as both.
+- **Compare:** `compare_copedants` diffs the sighting sets of the two necks per `(root_pc, chord_type)`. The status is `new_chord` or `lost_chord` when the chord isn't available at all on one side at the same bar position. Otherwise it is `new_ways`, `fewer_ways` or `changed_ways`. Each item is also scanned on its own (`per_item`). `interactions` holds the total's sightings that no single item explains, i.e. effects of changes working together.
+- **Verification:** every gained sighting passes `grip_matches_chord` on the modified neck, and every lost one on the baseline. A failure is logged and dropped.
+- **Filters:** `filter_report(report, chord_types, allowed_controllers, include_shells, max_controllers)` works on an already computed report, with no re-scan. `allowed_controllers` keeps only the sightings whose controllers (with `_HALF` folded onto the base ID) are a subset, open bar included. Each report carries the full `base_scan` and `mod_scan`, so the status is **recomputed inside the filter**: "new chord" then means the chord wasn't playable before with only those controllers.
+- **Names:** `root_name` and `chord_symbol` use the global spelling (`theory.spell_pc`).
+- **Inversions:** each sighting stores `bass_interval`, the semitones from the root to the grip's **lowest resolved pitch** (so pulls that cross strings count). It is excluded from equality, so the same stance + grip is still the same way. `inversion_index` counts in stacked thirds: R = 0 (root position); 3rd or the sus 4 = 1; 5th = 2; 7th or the 6 of a 6th chord = 3; 9/11/13 = 4 (extension in bass). `inversion_name` gives e.g. "2nd inversion (5 in bass)". `sighting_filter(inversions=...)` filters on it, and both dialogs offer it as the "Inversions" menu in `ChordFilterBar`.
+
+## chord_atlas.py (E-27)
+
+- **Scan:** `build_atlas(neck)` reuses the compare scan (`candidate_stances`, `scan_chords`, the same match rule) at fret 0. It covers every grip of **3-5 strings within a 6-string span** and stores one `AtlasEntry(root_pc, chord_type, sightings)` per chord, ways sorted easiest first. `verify=True` re-checks each way with `grip_matches_chord`, which takes about 2 s on a U12. The dialog passes `verify=False`, and `test_every_way_sounds_its_chord` checks every way on the E9, C6 and U12-3HS factory necks.
+- **Filters** run on the stored atlas, with no re-scan: `filter_atlas(atlas, keep, chord_types, root_pc)`, where `keep` comes from `copedant_compare.sighting_filter(allowed_controllers, include_shells, max_controllers, grips)`. This is the same predicate that Compare's `filter_report` uses.
+- **Grip configurations:** `grips_for_config(neck, source, sizes, max_span, current_pocket, custom)`. The sources are all string groups, the grip bar's pocket presets (`pocket_presets`, from `core/grip_presets.py`), the voicing finder grips (`VoicingSolver.get_candidate_grips`), the current fretboard pocket, or a custom list parsed by `parse_grip_list("8-6-5, 6-5-4")`.
+- **Grip size vs. span:** "Notes per grip" (3/4/5) is the number of strings picked. "Max stretch" is the distance between the outer strings, counting skipped strings (8-6-5 = 4, 10-8-6 = 5).
+- **Find mode (E-28, replaces the Voicing Finder's search):** `find_chord(atlas, root, chord_type, omitted, allow_no_fifth, max_fret)` returns one `ChordPosition(fret, sighting, ergonomics, formula, missing, score)` per fret + stance + grip, for frets 0..`max_fret`. It reuses `atlas.stance_midis` (the fret-0 pitches of every stance) and transposes them, so nothing is re-resolved: about 0.07 s on E9 and 0.4 s on U12.
+  - **Match rule (the same as the atlas, so the modes can't disagree):** the grip's pitch classes must equal the chord tones minus `omitted`, so an omitted tone must **not** sound. `allow_no_fifth` (the "no-5th shells" box) also lets a 4+-tone chord drop its 5th. Unlike the old `find_all_voicings`, an incomplete grip (a plain triad) is not reported as a 7th chord; the tests check that every full-chord voicing the old finder found is still found.
+  - `formula` lists the interval labels from the lowest pitch up. `sort_positions(..., "easiest" | "fret")`.
+- **Radar (E-29):** `find_neighbors(atlas, origin_root, origin_fret, origin_strings, origin_controllers, allowed_moves, allow_no_fifth)` returns `NeighborMove`s for IV, V, V7, vi and ii within ±9 frets. Each target comes from `find_chord`, so it **must sound every tone** (`allow_no_fifth` lets V7 drop its 5th), and a plain triad is never offered as a V7 (the old `VoicingSolver.find_circle_neighbors` did that). Grips: the origin's strings first, then nearby grips of the same size or one string more (outer strings within 3 in total); awkward stances are skipped. The moves are: same fret (pedal change); hold pedals and slide; open-bar shift; position shift. The old hard-coded "P1+P2 slide +2" case is gone (it used IDs, not roles). The best move for each relationship is always kept, then the list fills to 12, grouped by relationship. About 0.03 s on E9 and 0.14 s on U12 (the old radar took 0.2 s and 1.1 s).
+- **Controller filter modes:** `sighting_filter(..., controller_match=)` takes `"exact"` (exactly the selected controllers), `"include"` (the selection plus any others) or `"only"` (subsets of the selection, open bar included; the default in core, used by Compare's status logic). `ChordFilterBar` offers all three and defaults to **Exactly these**.
+- **Views:** `by_stance(entries)` maps stance → (chord, way). `coverage(entries, tonic_pc)` maps chord type → {degree above the tonic: number of ways}.
+
 ## pearls_engine.py, flashcard_engine.py, permutation_engine.py, tab_generator.py
 
 - **Pearls:** scans frets 0–22 under the open, A, B, A+B, F and D stances (resolved per neck), using resolver pitches for the chosen string pair. Both notes must be in the scale.
 - **Flashcards:** a prompt is the major star map of a random root **for the given neck**, clicked in strict left-to-right order within the time limit.
-- **Permutations:** 24 unique T/I/M patterns. Entries 18, 20, 21 and 23 were duplicates and were replaced with unused three-finger patterns. **The table and names are not verified against Franklin's book** (see D-36). `generate_sequence` sorts strings **bass first**, so the thumb plays the lowest-pitched string. Grips with fewer than 4 strings keep the thumb on the bass.
+- **Permutations:** the 24 entries are Franklin's chart (*Intervals* p. 38), D-36. Each is `(fingering, book notes, fingers, order)`. `order` holds the positions within the 4-string group (0 = lowest pitch), so every permutation plays each string once; on open E9 strings 8-7-6-5 they sound exactly the book's note sequences (tested through the resolver). Fingerings repeat between entries (#2 and #21 are both T-I-M-T); the order is what is unique. `generate_sequence` sorts strings **bass first** and uses the 4 lowest. Grips with 3 strings double the bass, and grips with 2 strings double both.
 - **Tab:** every column is exactly `col_width` (12) characters wide, in the header, pick, string and pedal rows alike.
 
 ## progression_presets.py

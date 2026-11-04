@@ -5,7 +5,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from core.models import Neck
 from core.resolver import FretboardResolver
 from core.stances import detect_roles, resolve_stance
-from core.theory import NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, SCALE_FORMULAS
+from core.theory import NOTE_TO_SEMITONE, SCALE_FORMULAS, spell_pc
 
 
 @dataclass
@@ -94,8 +94,8 @@ class PearlsEngine:
 
                 if deg1_offset in scale_dict and deg2_offset in scale_dict:
                     deg_lbl = scale_dict[deg2_offset]
-                    n1 = NOTE_NAMES_SHARP[p1_pc]
-                    n2 = NOTE_NAMES_SHARP[p2_pc]
+                    n1 = spell_pc(p1_pc)
+                    n2 = spell_pc(p2_pc)
 
                     interval_semitones = abs(p1_pitch - p2_pitch) % 12
                     int_desc = cls._get_interval_name(interval_semitones)

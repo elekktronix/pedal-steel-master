@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, to_root_name
+from core.theory import CHORD_FORMULAS, note_names, to_root_name
 from core.voicing_solver import VoicingSolver
 
 
@@ -39,7 +39,7 @@ class HarmonicTargetPanel(QWidget):
         grid.addWidget(QLabel("Root:"), 0, 0)
         self.combo_root = QComboBox()
         self.combo_root.addItem("None")
-        self.combo_root.addItems(NOTE_NAMES_SHARP)
+        self.combo_root.addItems(note_names())  # global sharps/flats preference
         self.combo_root.setCurrentText("E")
         self.combo_root.currentIndexChanged.connect(self._on_change)
         grid.addWidget(self.combo_root, 0, 1)
@@ -110,7 +110,7 @@ class HarmonicTargetPanel(QWidget):
     def set_target(self, root: str, chord_type: str):
         self.combo_root.blockSignals(True)
         self.combo_chord.blockSignals(True)
-        sharp_root = to_root_name(root)  # accepts flats like "Bb" (D-05)
+        sharp_root = to_root_name(root, note_names())  # any spelling -> the combo's spelling (D-05)
         if sharp_root:
             self.combo_root.setCurrentText(sharp_root)
         if chord_type in CHORD_FORMULAS:

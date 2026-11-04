@@ -22,6 +22,10 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "show_nashville": True,
     "use_newman_tuning": False,
     "pedal_swells": True,
+    "note_spelling": "sharps",         # "sharps" or "flats": how note and chord names are displayed
+    "key_aware_spelling": True,        # circle of fifths / triad explorer spell by key signature
+    "perm_click_sound": "Woodblock",   # permutation trainer metronome (CLICK_SOUNDS key, "Chirp (WAV)" or "Off")
+    "perm_click_mode": "Every note",   # or "Beat 1 only"
 }
 
 

@@ -47,7 +47,7 @@ class CircleOfFifthsEngine:
     @classmethod
     def get_diatonic_chords(cls, key_center: str) -> List[DiatonicChordInfo]:
         """Returns the 7 diatonic family chords for a given major key center."""
-        from core.theory import NOTE_TO_SEMITONE
+        from core.theory import NOTE_TO_SEMITONE, is_key_aware_spelling, spell_pc
 
         if key_center not in NOTE_TO_SEMITONE:
             key_center = "C"
@@ -59,7 +59,8 @@ class CircleOfFifthsEngine:
         chords = []
         for role, semitone_offset, c_type in DIATONIC_ROLES:
             chord_pc = (root_pc + semitone_offset) % 12
-            chord_root = naming_table[chord_pc]
+            # Key signature spelling by default; the global sharps/flats preference if key-aware spelling is off.
+            chord_root = naming_table[chord_pc] if is_key_aware_spelling() else spell_pc(chord_pc)
             chords.append(
                 DiatonicChordInfo(
                     role=role,

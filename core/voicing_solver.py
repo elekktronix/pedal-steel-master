@@ -120,6 +120,11 @@ class VoicingSolver:
         return stances
 
     @classmethod
+    def candidate_stances(cls, neck: Neck) -> List[Set[str]]:
+        """Public alias of the ergonomic stance list (used by core.copedant_compare, E-25)."""
+        return cls._generate_candidate_stances(neck)
+
+    @classmethod
     def classify_movement(
         cls,
         origin_fret: int,
@@ -384,7 +389,7 @@ class VoicingSolver:
             return (f"{ninth_note}m", "Minor triad on 9th", f"Play {ninth_note}m triad (9-11-13) over {root_name} bass for {root_name}13")
 
         # 5. Altered Dominant 7(b9#5): Minor triad off the b9th
-        if "alt" in chord_type.lower() or "b9#5" in chord_type or "7#9" in chord_type:
+        if "alt" in chord_type.lower() or "b9#5" in chord_type:
             b9_note = NOTE_NAMES_SHARP[(root_pc + 1) % 12]
             return (f"{b9_note}m", "Minor triad on b9th", f"Play {b9_note}m triad (b9-3-#5) over {root_name} bass for {root_name}7alt")
 
