@@ -902,18 +902,35 @@ class MainWindow(QMainWindow):
         self.scale_finder = ScaleFinderWidget(
             neck=current_neck,
             show_box_initial=show_scale_box,
+            overlay_label_initial=self.settings.get("scale_overlay_label", "step"),
             parent=self,
         )
         self.scale_finder.setWindowFlags(Qt.Window)
-        self.scale_finder.setWindowTitle("Scale Pocket Finder & Degree Ladder")
+        self.scale_finder.setWindowTitle("Scale Finder")
         self.scale_finder.resize(920, 520)
         self.scale_finder.scale_step_applied.connect(self._apply_scale_step)
         self.scale_finder.box_highlight_requested.connect(self.canvas.set_box_highlight)
         self.scale_finder.clear_highlight_requested.connect(self.canvas.clear_box_highlight)
         self.scale_finder.box_shading_toggled.connect(self._on_scale_box_preference_changed)
         self.scale_finder.play_note_requested.connect(self.audio.play_note)
-        self.scale_finder.play_notes_requested.connect(self.audio.play_scale_sequence)
         self.scale_finder.target_changed.connect(self._on_scale_target_changed)
+        # Scale map overlay (E-30)
+        self.canvas.set_overlay_label_mode(self.scale_finder.overlay_label_mode())
+        self.scale_finder.overlay_changed.connect(self.canvas.set_scale_overlay)
+        self.scale_finder.overlay_cleared.connect(self.canvas.clear_scale_overlay)
+        self.scale_finder.overlay_step_changed.connect(self.canvas.set_overlay_active_step)
+        self.scale_finder.overlay_label_mode_changed.connect(self._on_scale_overlay_label_changed)
+        self.canvas.overlay_step_clicked.connect(self.scale_finder.select_step)
+        # Learning aids (E-30 phase 3)
+        self.scale_finder.ghost_changed.connect(self.canvas.set_scale_ghost)
+        self.scale_finder.overlay_loop_changed.connect(self.canvas.set_overlay_loop)
+        self.scale_finder.overlay_quiz_changed.connect(self.canvas.set_overlay_quiz)
+        self.scale_finder.overlay_reveal_requested.connect(self.canvas.reveal_overlay_notes)
+        self.scale_finder.overlay_wrong_marked.connect(self.canvas.mark_overlay_wrong)
+        self.canvas.quiz_note_clicked.connect(self.scale_finder.answer_quiz)
+        # Scale <-> chord link (E-31)
+        self.scale_finder.overlay_chord_changed.connect(self.canvas.set_overlay_chord)
+        self.scale_finder.find_chord_requested.connect(self._find_scale_chord_voicings)
 
         self.circle_widget = CircleOfFifthsWidget(neck=current_neck, parent=self)
         self.circle_widget.setWindowFlags(Qt.Window)
@@ -946,10 +963,34 @@ class MainWindow(QMainWindow):
         self.canvas.set_scale_analysis(root, scale_name)
 
     def _apply_scale_step(self, fret: int, levers: list, string_number: int, banner: str):
-        # The scale finder plays the note itself; the pocket is the single stepped string.
-        self.apply_stance(fret, levers, None, play=False)
-        self.canvas.set_active_pocket({string_number})
-        self.canvas.set_explicit_banner(banner)
+        # The scale finder plays the note itself. The pocket is left alone: the scale map overlay
+        # marks the current step, so the other strings stay visible (E-30).
+        self.apply_stance(fret, levers, None, play=False, banner=banner)
+
+    def _find_scale_chord_voicings(self, root: str, chord_type: str, min_fret: int, max_fret: int):
+        """Scale Finder -> Chord Atlas Find mode for a chord of the scale, in the scale's frets (E-31)."""
+        self._open_chord_atlas(find_root=root, find_chord_type=chord_type)
+        dlg = getattr(self, "_atlas_dlg", None)
+        if dlg is not None:
+            dlg.set_find_fret_range(min_fret, max_fret)
+
+    def _open_scale_for_chord(self, scale_root: str, scale_name: str, chord_root: str, chord_type: str, fret: int):
+        """Chord Atlas "Scales that fit" -> Scale Finder on that scale with the chord ringed (E-31).
+        With a selected voicing the range is 4 frets around its bar fret."""
+        sf = self.scale_finder
+        sf.set_target(scale_root, scale_name)
+        if fret >= 0:
+            lo = max(0, min(21, fret - 1))
+            sf.set_fret_range(lo, lo + 3)
+        sf.select_chord(chord_root, chord_type)
+        sf.show()
+        sf.raise_()
+        sf.activateWindow()
+
+    def _on_scale_overlay_label_changed(self, mode: str):
+        self.canvas.set_overlay_label_mode(mode)
+        self.settings["scale_overlay_label"] = mode
+        save_settings(self.settings)
 
     def _on_circle_chord_triggered(self, root: str, chord_type: str, add_to_sequencer: bool):
         neck = self.guitar.necks[self.current_neck_idx]
@@ -1166,6 +1207,7 @@ class MainWindow(QMainWindow):
         dlg.stance_selected.connect(self._on_triad_grip_selected)  # set target, then apply_stance
         dlg.activate_neck_requested.connect(self._select_copedant_index)
         dlg.target_changed.connect(self.harmonic_panel.set_target)  # Find mode target follows
+        dlg.scale_requested.connect(self._open_scale_for_chord)  # E-31
         self.canvas.pocket_changed.connect(dlg.set_current_pocket)
         dlg.destroyed.connect(lambda *_: setattr(self, "_atlas_dlg", None))
         self._atlas_dlg = dlg

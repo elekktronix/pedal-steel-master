@@ -126,3 +126,37 @@ def is_c6_neck(neck: Neck) -> bool:
     from core.models import NeckType
 
     return neck.neck_type == NeckType.C6 or "C6" in neck.name
+
+
+# Short player-facing names for each role (E-30). C6 roles use the standard pedal numbers.
+ROLE_DISPLAY_NAMES: Dict[str, str] = {
+    "A": "A", "B": "B", "C": "C", "F": "F lever", "D": "D lever", "BL": "Bb lever",
+    "C6P4": "P4", "C6P5": "P5", "C6P6": "P6", "C6P7": "P7", "C6P8": "P8",
+}
+
+
+def controller_display_names(neck: Neck, roles: Optional[Dict[str, str]] = None) -> Dict[str, str]:
+    """Controller ID -> name to show the player: the role name where the controller has one
+    (E9 roles on E9 necks, C6 roles on C6 necks), otherwise its label, otherwise its ID."""
+    roles = detect_roles(neck) if roles is None else roles
+    names = {cid: (ctrl.label or cid) for cid, ctrl in {**neck.pedals, **neck.knee_levers}.items()}
+    c6 = is_c6_neck(neck)
+    for role, cid in roles.items():
+        if role.startswith("C6P") == c6:
+            names[cid] = ROLE_DISPLAY_NAMES[role]
+    return names
+
+
+def describe_controllers(controllers: Iterable[str], names: Dict[str, str]) -> str:
+    """'A + F lever', 'Open', or 'B + P3 (half)' for a half-stop token."""
+    parts = []
+    def _key(cid: str):  # pedals (by position) before knee levers
+        base = cid[:-5] if cid.endswith("_HALF") else cid
+        is_pedal = base.startswith("P") and base[1:].isdigit()
+        return (0, _pedal_sort_key(base)) if is_pedal else (1, (0, base))
+
+    for cid in sorted(controllers, key=_key):
+        half = cid.endswith("_HALF")
+        base = cid[:-5] if half else cid
+        parts.append(names.get(base, base) + (" (half)" if half else ""))
+    return " + ".join(parts) if parts else "Open"

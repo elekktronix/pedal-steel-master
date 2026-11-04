@@ -14,7 +14,8 @@
 | Engaged controllers (incl. `_HALF`) | `FretboardCanvas.engaged_levers` | `LeverTogglePanel.active_controllers`, each `HalfStopLeverButton.state` (0/1/2), feasibility badge |
 | Pocket (picked strings) | `FretboardCanvas.active_pocket` | `GripPocketBar` highlights, `ScaleFinderWidget.active_pocket`, `CircleOfFifthsWidget.active_pocket` |
 | Harmonic target | `HarmonicTargetPanel` combos → `canvas.target_root/target_chord` | up-the-neck dropdown, Chord Atlas Find-mode combos (via `target_changed`) |
-| Scale target | `ScaleFinderWidget` → `canvas.target_root/target_scale` | — |
+| Scale target | `ScaleFinderWidget` → `canvas.target_root/target_scale` (sent only while the finder is shown) | — |
+| Scale map overlay (E-30) | `FretboardCanvas.scale_overlay`, `overlay_label_mode` (`step`/`degree`/`note`, setting `scale_overlay_label`), `overlay_active_step`, `overlay_run`, `overlay_loop_ids`, `scale_ghost`, `overlay_quiz`/`overlay_revealed`/`overlay_wrong` | `ScaleFinderWidget` (fret range, run, loop, quiz) |
 | Resolved strings | `FretboardCanvas.active_states` (recomputed in `update_state()`) | read directly by MainWindow, the permutation trainer, etc. |
 | Detected chord label | `FretboardCanvas.detected_chord_label` (overwritten by `set_explicit_banner`) | — |
 | Preferences | `MainWindow.settings` dict → `app_settings.json` | menu check states, NNS button |
@@ -93,7 +94,13 @@ At the end of `MainWindow.__init__`, `_restore_session(load_session())` runs. It
 | `HarmonicTargetPanel.target_changed / reset_requested / find_voicings_requested` | object,object (`None,None` = no target) / — / — | `_on_harmonic_target_changed` / `lever_panel.reset_all` / toggle voicing finder |
 | `RelativeMovesWidget.move_applied` | int,set,set,str,str | `_apply_relative_move` |
 | `ChordAtlasDialog.target_changed` (Find-mode target) | str,str | `harmonic_panel.set_target` (radar moves go through `stance_selected`) |
-| `ScaleFinderWidget.scale_step_applied, box_highlight_requested, clear_highlight_requested, box_shading_toggled, play_note(s)_requested, target_changed` | various | `_apply_scale_step`, canvas box, settings, audio, `canvas.set_scale_analysis` |
+| `ScaleFinderWidget.scale_step_applied, box_highlight_requested, clear_highlight_requested, box_shading_toggled, play_note_requested, target_changed` | various | `_apply_scale_step` (`apply_stance` with banner; the pocket is left alone), canvas box, settings, `audio.play_note`, `canvas.set_scale_analysis`. Play Run is a widget timer (one note per Tempo beat, lighting each circle via `overlay_step_changed`), so it can be stopped; `play_notes_requested` was removed. |
+| `ScaleFinderWidget.overlay_changed / overlay_cleared / overlay_step_changed / overlay_label_mode_changed` (E-30) | list,list / — / int / str | `canvas.set_scale_overlay` / `clear_scale_overlay` / `set_overlay_active_step` / `_on_scale_overlay_label_changed` (canvas + settings). The finder publishes on show and on every change while shown, and clears the overlay and shading on hide. |
+| `FretboardCanvas.overlay_step_clicked` (E-30) | int | `scale_finder.select_step` (clicking a circle that is not a step plays it via `node_clicked`) |
+| `ScaleFinderWidget.ghost_changed / overlay_loop_changed / overlay_quiz_changed / overlay_reveal_requested / overlay_wrong_marked` (E-30 phase 3) | list / int,int / bool / list / object | `canvas.set_scale_ghost` / `set_overlay_loop` (-1 = none) / `set_overlay_quiz` / `reveal_overlay_notes` / `mark_overlay_wrong`. `clear_scale_overlay` resets all of them. |
+| `ScaleFinderWidget.overlay_chord_changed / find_chord_requested` (E-31) | list (pitch classes) / str,str,int,int | `canvas.set_overlay_chord` (gold rings, other notes dimmed) / `_find_scale_chord_voicings` → `_open_chord_atlas` Find mode + `set_find_fret_range` |
+| `ChordAtlasDialog.scale_requested` (E-31) | str,str,str,str,int (scale root, scale, chord root, chord type, fret or -1) | `_open_scale_for_chord`: `scale_finder.set_target`, range fret-1..fret+2 when a voicing is selected, `select_chord`, show |
+| `FretboardCanvas.quiz_note_clicked` (E-30 phase 3) | object (BoxNote) | `scale_finder.answer_quiz` (replaces `overlay_step_clicked` while the quiz runs; ghosts are not clickable then) |
 | `CircleOfFifthsWidget.chord_triggered` | str,str,bool,set | `_on_circle_chord_triggered` (the 4th arg, allowed mechanics, is dropped) |
 | `ProgressionSequencerWidget.step_activated` | int,list,set | `_apply_sequencer_step` |
 | `VoiceLeaderDialog.voicing_path_applied` / `voicing_applied` | list[(idx, VoicingMatch)] / int,list,list | `_apply_voice_leader_path` / `_apply_solved_voicing` |

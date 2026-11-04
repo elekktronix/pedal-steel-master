@@ -19,6 +19,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "theme": "dark",
     "show_inversions": True,
     "show_scale_box": True,
+    "scale_overlay_label": "step",     # scale map circles: "step", "degree" or "note"
     "show_nashville": True,
     "use_newman_tuning": False,
     "pedal_swells": True,

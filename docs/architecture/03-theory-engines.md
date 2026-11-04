@@ -4,12 +4,13 @@ Each engine is a class of `@classmethod`s with no instance state. **Copedant-awa
 
 | Engine | Entry point(s) | Output | Copedant-aware? | Consumers |
 |---|---|---|---|---|
-| `stances` | `detect_roles`, `resolve_stance`, `grip_matches_chord`, `is_c6_neck` | role map / ID set / bool | ✅ (it *is* the adapter) | star map, relative moves, scale, pearls, presets, audio |
+| `stances` | `detect_roles`, `resolve_stance`, `grip_matches_chord`, `is_c6_neck`, `controller_display_names`, `describe_controllers` | role map / ID set / bool / ID → name / text | ✅ (it *is* the adapter) | star map, relative moves, scale, pearls, presets, audio |
 | `theory` | formulas, `note_to_midi`, `get_nashville_chord_symbol`, `to_root_name` | dicts / str | n/a | everything |
 | `chord_identifier.ChordIdentifier` | `identify_voicing(pitches, bass, show_inversion, grip)` | `(display_tag, family)` | n/a (pitch-only) | canvas, relative_moves, stance inspector |
 | `voicing_solver.VoicingSolver` | `find_all_voicings`, `find_circle_neighbors`, `get_triad_substitution`, `classify_movement` | `List[VoicingMatch]`, `List[NeighborVoicing]` | ✅ | circle widget, voice leader, triad explorer, main (`find_circle_neighbors` is no longer used by the UI) |
 | `voice_leader.VoiceLeadingEngine` | `solve_progression(neck, prog, constraints)` | one `Optional[VoicingMatch]` per measure | ✅ | voice leader dialog |
-| `scale_engine.ScaleSolver` | `find_scale_boxes(neck, root, scale, span, max_fret)` | `List[ScaleBox]` (≤5) | ✅ (role combos) | scale finder |
+| `scale_chords` (E-31) | `chords_in_scale(root, scale, sevenths=None)`, `scales_for_chord(root, chord_type)` | `List[ScaleChord]` / `List[ChordScale]` | n/a (pitch classes only) | scale finder chord rows, Chord Atlas "Scales that fit" |
+| `scale_engine.ScaleSolver` | `find_scale_boxes(neck, root, scale, span, max_fret)`, `find_scale_in_range(neck, root, scale, min_fret, max_fret)` | `List[ScaleBox]` (≤5) / `ScaleBox` or `None` | ✅ (role combos) | scale finder |
 | `relative_moves.RelativeMovesEngine` | `get_all_same_fret_chords`, `get_same_fret_diatonic_hub`, `get_e9_relative_movements`, `get_c6_relative_movements` | `List[RelativeMoveOption]` | ✅ (role stances, verified) | relative moves widget |
 | `star_map_engine.StarMapEngine` | `calculate_landmarks(root, type, neck)` | `List[StarMapLandmark]` | ✅ (role stances, verified) | main ribbon, star-map dialog, flashcards |
 | `pearls_engine.PearlsEngine` | `generate_scale_run(key, track, scale, max_fret, neck)` | `List[PearlStep]` | ✅ | pearls dialog |
@@ -91,6 +92,18 @@ Other functions:
 ## scale_engine.py
 
 For each anchor window it resolves every (fret, combo) **once** (cached) and keeps the scale tones per string, preferring the variant with the fewest controllers. Boxes are scored and up to 5 are picked greedily, at least 2 frets apart. The combos are role tokens: E9 uses open, A, B, A+B, F, D, A+F and B+RKL; C6 uses open, the five C6 pedals, P4+P5, P5+P6, RKL and RKR. They are resolved per neck.
+
+`find_scale_in_range` (E-30) harvests one user-chosen fret range (inclusive, clamped to 0–24, swapped if reversed) with the same per-string rule and the same strictly ascending run, but without the coverage filter. Both entry points share `_harvest_window`. The scale finder shows the range; `find_scale_boxes` (4-fret windows) only feeds its suggested positions.
+
+Combos whose resolved controllers fail `ErgonomicsEngine.evaluate_stance` are dropped (E-30 phase 2).
+
+**Step order (E-30 phase 2).** `ascending_run` is `playable_run(notes)`: one note per distinct pitch, low to high, where each pitch's spot (string, fret, controllers) is chosen by dynamic programming to minimise the summed `transition_cost`: 3 per fret of bar travel, 2 per controller pressed or released, 1.5 per string skipped beyond the neighbour, 2.5 for moving to a lower-pitched string while climbing, plus 0.5 per controller held for a note (`COST_*` class constants). `run_cost(run)` sums the transitions. `build_run(box, direction, root_to_root)` gives `"up"`, `"down"` (the up run reversed) or `"updown"` (up then back down without repeating the top note, so a `BoxNote` can appear twice), optionally trimmed to the lowest..highest root.
+
+## scale_chords.py (E-31)
+
+Pure pitch-class theory, no fretboard. `chords_in_scale` returns every triad (Major, Minor, Diminished, Augmented) and seventh (Major 7th, Dominant 7th, Minor 7th, Half-Diminished, Diminished 7th) rooted on a scale degree whose tones all lie in the scale, in degree order, as `ScaleChord(root_pc, root_name, chord_type, degree, numeral, symbol, pcs)`. Numerals follow the degree label (`b3` → `bIII`), lower case for minor-family chords, with `°`, `+`, `maj7`, `7`, `ø7`, `°7`. Non-diatonic scales simply yield what fits (blues on G: G, Gm, Em, Edim). `scales_for_chord` returns every (root, scale) containing the chord as `ChordScale(root_name, scale_name, chord_degree, extra_notes)`, own-root scales first, then the closest fits. Fretboard positions stay with the resolver-backed engines: the ringed notes come from the scale map and the voicings from `chord_atlas.find_chord`.
+
+**Display names.** `stances.controller_display_names(neck)` maps controller IDs to player names: E9 roles on E9 necks (`A`, `B`, `C`, `F lever`, `D lever`, `Bb lever`), C6 roles on C6 necks (`P4`…`P8`), otherwise the label. `describe_controllers(ids, names)` joins them pedals first (`"A + F lever"`, `"Open"`, `"C (half)"`). Display only: logic still uses IDs.
 
 ## relative_moves.py
 

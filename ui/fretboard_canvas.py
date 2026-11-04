@@ -5,17 +5,39 @@ interactive node plucking, split halos, and interval vs. note name display toggl
 from typing import Dict, List, Optional, Set, Tuple, Union
 from PySide6.QtCore import QPointF, QRectF, Qt, Signal
 from PySide6.QtGui import QBrush, QColor, QCursor, QFont, QPainter, QPen
-from PySide6.QtWidgets import QWidget
+from PySide6.QtWidgets import QToolTip, QWidget
 
 from core.chord_identifier import ChordIdentifier
 from core.models import Neck
 from core.resolver import ActiveStringState, FretboardResolver
+from core.stances import controller_display_names, describe_controllers
+
+
+def degree_color(lbl: str) -> QColor:
+    """Node colour for a chord interval or scale degree label ("R", "1", "b3", "#4", "13", ...)."""
+    if lbl in ("R", "1"):
+        return QColor(220, 53, 69)
+    if lbl in ("2", "9", "b9", "#9"):  # extensions first: "13" must not match "3"
+        return QColor(23, 162, 184)
+    if lbl in ("4", "11", "#11", "#4"):
+        return QColor(111, 66, 193)
+    if lbl in ("6", "13", "b13", "b6"):
+        return QColor(253, 126, 20)
+    if "3" in lbl:
+        return QColor(40, 167, 69)
+    if "5" in lbl:
+        return QColor(0, 123, 255)
+    if "7" in lbl:
+        return QColor(255, 193, 7)
+    return QColor(108, 117, 125)
 
 
 class FretboardCanvas(QWidget):
     fret_changed = Signal(int)
     pocket_changed = Signal(set)
     node_clicked = Signal(int, int)  # (midi_pitch, string_number)
+    overlay_step_clicked = Signal(int)  # index into the scale overlay's run (E-30)
+    quiz_note_clicked = Signal(object)  # BoxNote clicked while the scale quiz is running (E-30)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -36,6 +58,20 @@ class FretboardCanvas(QWidget):
         self.show_nashville: bool = True
         self.box_highlight_range: Optional[Tuple[int, int]] = None
         self.display_mode: str = "intervals"  # "intervals" or "notes"
+
+        # Scale map overlay (E-30): scale tones drawn at their own frets, independent of the bar.
+        # Entries are (note, step_index or None); note is a core.scale_engine.BoxNote.
+        self.scale_overlay: List[Tuple[object, Optional[int]]] = []
+        self.overlay_label_mode: str = "step"  # "step", "degree" or "note"
+        self.overlay_active_step: int = -1
+        self.overlay_run: list = []  # the run in play order; a note can appear twice (up & back)
+        self.overlay_names: Dict[str, str] = {}  # controller ID -> display name for tooltips
+        self.overlay_loop_ids: Optional[Set[int]] = None  # ids of the looped notes; None = no loop
+        self.scale_ghost: list = []  # faint scale tones outside the range ("whole neck")
+        self.overlay_quiz: bool = False  # circles drawn blank until revealed
+        self.overlay_revealed: Set[int] = set()
+        self.overlay_wrong: Optional[int] = None
+        self.overlay_chord_pcs: Set[int] = set()  # chord tones ringed on the scale map (E-31)
 
         self.active_states: List[ActiveStringState] = []
         self.num_frets = 24
@@ -119,6 +155,200 @@ class FretboardCanvas(QWidget):
         self.box_highlight_range = None
         self.update()
 
+    def set_scale_overlay(self, notes: list, run: list):
+        """Shows every scale tone in `notes` at its own fret; notes in `run` are numbered by step."""
+        step_of: Dict[int, int] = {}
+        for i, n in enumerate(run):
+            step_of.setdefault(id(n), i)  # a note visited twice is labelled with its first step
+        self.scale_overlay = [(n, step_of.get(id(n))) for n in notes]
+        self.overlay_run = list(run)
+        self.overlay_active_step = -1
+        if self.neck:
+            self.overlay_names = controller_display_names(self.neck)
+        self.update()
+
+    def clear_scale_overlay(self):
+        self.scale_overlay = []
+        self.overlay_run = []
+        self.overlay_active_step = -1
+        self.overlay_loop_ids = None
+        self.scale_ghost = []
+        self.overlay_quiz = False
+        self.overlay_revealed = set()
+        self.overlay_wrong = None
+        self.overlay_chord_pcs = set()
+        self.update()
+
+    def set_overlay_chord(self, pcs: list):
+        """Rings the scale notes whose pitch class is a chord tone and dims the rest (empty = none)."""
+        self.overlay_chord_pcs = {int(pc) % 12 for pc in pcs}
+        self.update()
+
+    def set_overlay_loop(self, lo: int, hi: int):
+        """Fades run steps outside lo..hi (run indices); lo < 0 clears the loop."""
+        if lo < 0 or not self.overlay_run:
+            self.overlay_loop_ids = None
+        else:
+            self.overlay_loop_ids = {id(n) for n in self.overlay_run[lo:hi + 1]}
+        self.update()
+
+    def set_scale_ghost(self, notes: list):
+        self.scale_ghost = list(notes)
+        self.update()
+
+    def set_overlay_quiz(self, on: bool):
+        self.overlay_quiz = bool(on)
+        self.overlay_revealed = set()
+        self.overlay_wrong = None
+        self.update()
+
+    def reveal_overlay_notes(self, notes: list):
+        self.overlay_revealed = {id(n) for n in notes}
+        self.overlay_wrong = None
+        self.update()
+
+    def mark_overlay_wrong(self, note):
+        self.overlay_wrong = id(note) if note is not None else None
+        self.update()
+
+    def set_overlay_label_mode(self, mode: str):
+        if mode in ("step", "degree", "note"):
+            self.overlay_label_mode = mode
+            self.update()
+
+    def set_overlay_active_step(self, idx: int):
+        self.overlay_active_step = idx
+        self.update()
+
+    def _overlay_geometry(self, fret_w: float, spacing: float):
+        """Yields (x, y, radius, note, step); notes sharing a string and fret sit side by side."""
+        cells: Dict[Tuple[int, int], list] = {}
+        for note, step in self.scale_overlay:
+            cells.setdefault((note.string_number, note.fret), []).append((note, step))
+        base_r = max(6.0, min(10.0, fret_w * 0.32, spacing * 0.42))
+        for (s_num, fret), items in cells.items():
+            items.sort(key=lambda it: it[0].midi_note)
+            n = len(items)
+            r = base_r if n == 1 else max(5.0, min(base_r, fret_w * 0.95 / (2 * n)))
+            cx = self._get_fret_x(fret, fret_w)
+            cy = self.top_margin + (s_num - 1) * spacing
+            for i, (note, step) in enumerate(items):
+                x = cx + (i - (n - 1) / 2.0) * (2 * r + 1.5)
+                yield x, cy, r, note, step
+
+    def _ghost_geometry(self, fret_w: float, spacing: float):
+        """Yields (x, y, radius, note) for the faint whole-neck notes."""
+        cells: Dict[Tuple[int, int], list] = {}
+        for note in self.scale_ghost:
+            cells.setdefault((note.string_number, note.fret), []).append(note)
+        base_r = max(4.0, min(7.0, fret_w * 0.22, spacing * 0.3))
+        for (s_num, fret), items in cells.items():
+            items.sort(key=lambda n: n.midi_note)
+            n = len(items)
+            r = base_r if n == 1 else max(3.5, min(base_r, fret_w * 0.95 / (2 * n)))
+            cx = self._get_fret_x(fret, fret_w)
+            cy = self.top_margin + (s_num - 1) * spacing
+            for i, note in enumerate(items):
+                yield cx + (i - (n - 1) / 2.0) * (2 * r + 1.0), cy, r, note
+
+    def _overlay_hit(self, x: float, y: float):
+        """(note, step, is_ghost) under the point, or None. Ghosts are ignored during a quiz."""
+        num_strings = self.neck.string_count if self.neck else 10
+        board_w = max(100.0, self.width() - self.left_margin - self.right_margin)
+        board_h = max(100.0, self.height() - self.top_margin - self.bottom_margin)
+        fret_w = board_w / self.num_frets
+        spacing = board_h / (num_strings - 1 if num_strings > 1 else 1)
+        for nx, ny, r, note, step in self._overlay_geometry(fret_w, spacing):
+            if (x - nx) ** 2 + (y - ny) ** 2 <= (r + 1.5) ** 2:
+                return note, step, False
+        if not self.overlay_quiz:
+            for nx, ny, r, note in self._ghost_geometry(fret_w, spacing):
+                if (x - nx) ** 2 + (y - ny) ** 2 <= (r + 1.5) ** 2:
+                    return note, None, True
+        return None
+
+    def _interval_fill(self, lbl: str) -> QColor:
+        return degree_color(lbl)
+
+    def _draw_scale_overlay(self, painter: QPainter, fret_w: float, spacing: float):
+        if self.scale_ghost and not self.overlay_quiz:
+            painter.setFont(QFont("Segoe UI", 6))
+            chord = self.overlay_chord_pcs
+            for x, y, r, note in self._ghost_geometry(fret_w, spacing):
+                c = degree_color(note.degree_label)
+                a = 70 if not chord else (130 if note.midi_note % 12 in chord else 30)
+                painter.setBrush(QBrush(QColor(c.red(), c.green(), c.blue(), a)))
+                painter.setPen(QPen(QColor(c.red(), c.green(), c.blue(), min(255, a + 50)), 1.0))
+                painter.drawEllipse(QPointF(x, y), r, r)
+                if r >= 5.5:
+                    painter.setPen(QColor(255, 255, 255, 150) if self.is_dark_mode else QColor(30, 32, 38, 160))
+                    painter.drawText(QRectF(x - r, y - r, 2 * r, 2 * r), Qt.AlignCenter, note.degree_label)
+
+        run = self.overlay_run
+        active_note = run[self.overlay_active_step] if 0 <= self.overlay_active_step < len(run) else None
+        played_ids = {id(n) for n in run[:max(0, self.overlay_active_step)]}
+        loop_ids = self.overlay_loop_ids
+        pedal_dot = QColor(255, 140, 0)
+        for x, y, r, note, step in self._overlay_geometry(fret_w, spacing):
+            if self.overlay_quiz and id(note) not in self.overlay_revealed:
+                # Quiz: every circle looks the same until it is answered.
+                wrong = id(note) == self.overlay_wrong
+                painter.setBrush(QBrush(QColor(120, 125, 135) if self.is_dark_mode else QColor(160, 165, 175)))
+                painter.setPen(QPen(QColor(220, 53, 69) if wrong else QColor(255, 255, 255, 180), 3.0 if wrong else 1.2))
+                painter.drawEllipse(QRectF(x - r, y - r, 2 * r, 2 * r))
+                if wrong:
+                    painter.setFont(QFont("Segoe UI", 8, QFont.Bold))
+                    painter.setPen(QColor(255, 255, 255))
+                    painter.drawText(QRectF(x - r, y - r, 2 * r, 2 * r), Qt.AlignCenter, "✗")
+                continue
+            fill = QColor(self._interval_fill(note.degree_label))
+            in_run = step is not None
+            is_active = note is active_note
+            played = in_run and not is_active and id(note) in played_ids
+            if in_run and loop_ids is not None and id(note) not in loop_ids:
+                played = True  # outside the loop: drawn faded like a played step
+            chord_tone = bool(self.overlay_chord_pcs) and note.midi_note % 12 in self.overlay_chord_pcs
+            if self.overlay_chord_pcs and not chord_tone and not is_active:
+                fill.setAlpha(70)  # a chord is selected: non-chord scale notes step back
+
+            rr = r * 1.35 if is_active else r
+            rect = QRectF(x - rr, y - rr, rr * 2, rr * 2)
+            if not in_run:
+                # Not a step: the same pitch at another spot, or outside a root-to-root run.
+                painter.setBrush(QBrush(QColor(fill.red(), fill.green(), fill.blue(), 45)))
+                painter.setPen(QPen(fill, 1.5, Qt.DashLine))
+            else:
+                if played:
+                    fill.setAlpha(110)
+                painter.setBrush(QBrush(fill))
+                pen_c = QColor(255, 255, 255) if self.is_dark_mode or is_active else QColor(30, 32, 38, 160)
+                painter.setPen(QPen(pen_c, 3.0 if is_active else 1.2))
+            painter.drawEllipse(rect)
+            if chord_tone:
+                painter.setBrush(Qt.NoBrush)
+                painter.setPen(QPen(QColor(255, 215, 0), 2.5))
+                painter.drawEllipse(QPointF(x, y), rr + 3.0, rr + 3.0)
+
+            if note.engaged_levers:  # orange dot = needs a pedal or lever
+                d = max(2.5, r * 0.32)
+                painter.setBrush(QBrush(pedal_dot))
+                painter.setPen(QPen(QColor(20, 20, 20), 0.8))
+                painter.drawEllipse(QPointF(x + rr * 0.72, y - rr * 0.72), d, d)
+
+            if self.overlay_label_mode == "step" and in_run:
+                text = str(step + 1)
+            elif self.overlay_label_mode == "note":
+                text = note.note_name.rstrip("-0123456789")
+            else:
+                text = note.degree_label
+            size = 7 if (len(text) > 1 and rr < 9) else 8
+            painter.setFont(QFont("Segoe UI", size + (1 if is_active else 0), QFont.Bold))
+            if in_run:
+                painter.setPen(QColor(255, 255, 255, 150 if played else 255))
+            else:
+                painter.setPen(fill.lighter(140) if self.is_dark_mode else fill)
+            painter.drawText(rect, Qt.AlignCenter, text)
+
     def set_explicit_banner(self, banner_text: Optional[str]):
         self.detected_chord_label = banner_text
         self.update()
@@ -177,10 +407,23 @@ class FretboardCanvas(QWidget):
         fret_w = board_w / self.num_frets
         spacing = board_h / (num_strings - 1 if num_strings > 1 else 1)
 
+        # 0. Scale map overlay circles (E-30): run notes select their step, others just sound
+        if self.scale_overlay:
+            hit = self._overlay_hit(x, y)
+            if hit:
+                note, step, is_ghost = hit
+                if self.overlay_quiz:
+                    self.quiz_note_clicked.emit(note)
+                elif step is not None:
+                    self.overlay_step_clicked.emit(step)
+                else:
+                    self.node_clicked.emit(note.midi_note, note.string_number)
+                return
+
         # 1. Check if user clicked directly on an active pitch circle node at the tone bar
         bar_x = self._get_fret_x(self.bar_fret, fret_w)
         node_radius = 14.0
-        for state in self.active_states:
+        for state in ([] if self.scale_overlay else self.active_states):
             idx = state.string_number - 1
             sy = self.top_margin + idx * spacing
             dx = x - bar_x
@@ -220,7 +463,30 @@ class FretboardCanvas(QWidget):
 
         # Show pointer if hovering over a node or string badge
         is_over_node = False
-        for state in self.active_states:
+        if self.scale_overlay:
+            hit = self._overlay_hit(x, y)
+            if hit and self.overlay_quiz:
+                is_over_node = True
+                QToolTip.hideText()
+            elif hit:
+                is_over_node = True
+                note, step, is_ghost = hit
+                ctrls = describe_controllers(note.engaged_levers, self.overlay_names)
+                if is_ghost:
+                    head = "Outside the fret range"
+                elif step is not None:
+                    head = f"Step {step + 1}"
+                else:
+                    head = "Not a step (another spot for this pitch, or outside the run)"
+                QToolTip.showText(
+                    event.globalPosition().toPoint(),
+                    f"{head}\nDegree {note.degree_label}: {note.note_name}\n"
+                    f"String {note.string_number}, fret {note.fret}\n{ctrls}",
+                    self,
+                )
+            else:
+                QToolTip.hideText()
+        for state in ([] if self.scale_overlay else self.active_states):
             idx = state.string_number - 1
             sy = self.top_margin + idx * spacing
             if (x - bar_x) ** 2 + (y - sy) ** 2 <= 14.0 ** 2:
@@ -393,8 +659,12 @@ class FretboardCanvas(QWidget):
             painter.setPen(QColor(255, 255, 255) if is_in_pocket or is_split_on_str else badge_text_inactive)
             painter.drawText(badge_rect, Qt.AlignCenter, str(str_num))
 
+        # 6a. The scale map overlay replaces the bar nodes while it is shown (E-30)
+        if self.scale_overlay:
+            self._draw_scale_overlay(painter, fret_w, string_spacing)
+
         # 6. Active Pitch Nodes (Circles)
-        if self.active_states:
+        elif self.active_states:
             for state in self.active_states:
                 idx = state.string_number - 1
                 str_num = state.string_number
@@ -404,21 +674,7 @@ class FretboardCanvas(QWidget):
 
                 fill = self.color_other
                 if state.is_chord_tone:
-                    lbl = state.interval_label or ""
-                    if lbl in ("R", "1"):
-                        fill = self.color_root
-                    elif lbl in ("2", "9", "b9", "#9"):  # extensions first: "13" must not match "3"
-                        fill = QColor(23, 162, 184)
-                    elif lbl in ("4", "11", "#11"):
-                        fill = QColor(111, 66, 193)
-                    elif lbl in ("6", "13", "b13"):
-                        fill = QColor(253, 126, 20)
-                    elif "3" in lbl:
-                        fill = self.color_third
-                    elif "5" in lbl:
-                        fill = self.color_fifth
-                    elif "7" in lbl:
-                        fill = self.color_seventh
+                    fill = self._interval_fill(state.interval_label or "")
 
                 if not is_in_pocket:
                     fill = QColor(fill.red(), fill.green(), fill.blue(), 50)

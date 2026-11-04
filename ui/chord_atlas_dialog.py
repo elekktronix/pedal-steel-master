@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QHeaderView,
     QLabel,
     QLineEdit,
+    QMenu,
     QPushButton,
     QSpinBox,
     QSplitter,
@@ -81,6 +82,7 @@ from core.copedant_compare import (
 )
 from core.ergonomics import StanceDifficulty
 from core.models import Neck, SteelGuitar
+from core.scale_chords import scales_for_chord
 from core.theory import CHORD_FORMULAS, CHORD_SYMBOL_SUFFIX, NASHVILLE_SCALE_DEGREES, note_names, respell
 from ui.chord_filter_bar import ChordFilterBar
 
@@ -104,6 +106,8 @@ class ChordAtlasDialog(QDialog):
     activate_neck_requested = Signal(int)
     # Find mode root / chord type changed -> harmonic target panel
     target_changed = Signal(str, str)
+    # "Scales that fit" (E-31): scale root, scale name, chord root, chord type, fret (-1 = none selected)
+    scale_requested = Signal(str, str, str, str, int)
 
     def __init__(
         self,
@@ -221,11 +225,17 @@ class ChordAtlasDialog(QDialog):
         fd.addLayout(self.omit_box)
         self.tone_checks: Dict[str, QCheckBox] = {}
         fd.addSpacing(10)
-        fd.addWidget(QLabel("Up to fret:"))
+        fd.addWidget(QLabel("Frets:"))
+        self.spin_min_fret = QSpinBox()
+        self.spin_min_fret.setRange(0, 24)
+        self.spin_min_fret.setValue(0)
+        self.spin_min_fret.valueChanged.connect(self._on_min_fret_changed)
+        fd.addWidget(self.spin_min_fret)
+        fd.addWidget(QLabel("to"))
         self.spin_max_fret = QSpinBox()
         self.spin_max_fret.setRange(0, 24)
         self.spin_max_fret.setValue(15)
-        self.spin_max_fret.valueChanged.connect(self._refresh_view)
+        self.spin_max_fret.valueChanged.connect(self._on_max_fret_changed)
         fd.addWidget(self.spin_max_fret)
         self.chk_hide_awkward = QCheckBox("Hide awkward stances")
         self.chk_hide_awkward.toggled.connect(self._refresh_view)
@@ -298,7 +308,16 @@ class ChordAtlasDialog(QDialog):
         self.lbl_summary = QLabel("")
         self.lbl_summary.setWordWrap(True)
         self.lbl_summary.setTextFormat(Qt.RichText)
-        root.addWidget(self.lbl_summary)
+        summary_row = QHBoxLayout()
+        summary_row.addWidget(self.lbl_summary, stretch=1)
+        self.btn_scales = QPushButton("🎼 Scales that fit ▾")
+        self.btn_scales.setToolTip("Scales containing the selected chord: open one in the Scale Finder,\n"
+                                   "with its fret range around the selected voicing")
+        self.scales_menu = QMenu(self)
+        self.scales_menu.aboutToShow.connect(self._fill_scales_menu)
+        self.btn_scales.setMenu(self.scales_menu)
+        summary_row.addWidget(self.btn_scales)
+        root.addLayout(summary_row)
 
         self.tabs = QTabWidget()
         self.tree_chords = self._make_tree(["Chord", "Degree", "Ways"])
@@ -475,6 +494,69 @@ class ChordAtlasDialog(QDialog):
         else:
             self._refresh_view()
 
+    def set_find_fret_range(self, min_fret: int, max_fret: int):
+        """Limits Find mode to frets min_fret..max_fret (E-31: the Scale Finder's range)."""
+        lo, hi = sorted((max(0, min(24, int(min_fret))), max(0, min(24, int(max_fret)))))
+        for spin, val in ((self.spin_min_fret, lo), (self.spin_max_fret, hi)):
+            spin.blockSignals(True)
+            spin.setValue(val)
+            spin.blockSignals(False)
+        self._refresh_view()
+
+    def _on_min_fret_changed(self, value: int):
+        if value > self.spin_max_fret.value():
+            self.spin_max_fret.blockSignals(True)
+            self.spin_max_fret.setValue(value)
+            self.spin_max_fret.blockSignals(False)
+        self._refresh_view()
+
+    def _on_max_fret_changed(self, value: int):
+        if value < self.spin_min_fret.value():
+            self.spin_min_fret.blockSignals(True)
+            self.spin_min_fret.setValue(value)
+            self.spin_min_fret.blockSignals(False)
+        self._refresh_view()
+
+    def scale_chord_target(self):
+        """(root, chord type, fret) for "Scales that fit": the selected voicing, else the Find target."""
+        origin = self._selected_origin()
+        if origin is not None:
+            fret, _ctrls, _strings, root, ctype = origin
+            return root, ctype, fret
+        if self.mode == MODE_FIND:
+            return self.combo_find_root.currentText(), self.combo_find_type.currentText(), -1
+        return None
+
+    def _fill_scales_menu(self):
+        menu = self.scales_menu
+        menu.clear()
+        target = self.scale_chord_target()
+        if target is None:
+            act = menu.addAction("Select a chord first")
+            act.setEnabled(False)
+            return
+        root, ctype, fret = target
+        name = f"{respell(root)}{CHORD_SYMBOL_SUFFIX.get(ctype, '')}"
+        fits = scales_for_chord(root, ctype)
+        if not fits:
+            act = menu.addAction(f"No scale in the list contains {name}")
+            act.setEnabled(False)
+            return
+        same = [f for f in fits if f.chord_degree == "1"]
+        other = [f for f in fits if f.chord_degree != "1"]
+        for title, group in ((f"On {respell(root)}", same), ("As a chord of another key", other)):
+            if not group:
+                continue
+            menu.addSection(title)
+            for f in group:
+                label = f"{f.root_name} {f.scale_name}"
+                if f.chord_degree != "1":
+                    label += f"   ({name} on degree {f.chord_degree})"
+                act = menu.addAction(label)
+                act.triggered.connect(
+                    lambda _=False, f=f: self.scale_requested.emit(f.root_name, f.scale_name, root, ctype, fret)
+                )
+
     def omitted_tones(self) -> Set[str]:
         return {lbl for lbl, cb in self.tone_checks.items() if not cb.isChecked()}
 
@@ -622,7 +704,8 @@ class ChordAtlasDialog(QDialog):
                            allow_no_fifth=self.filter_bar.chk_shells.isChecked(),
                            max_fret=self.spin_max_fret.value())
         hide_awkward = self.chk_hide_awkward.isChecked()
-        found = [p for p in found if keep(p.sighting)
+        min_fret = self.spin_min_fret.value()
+        found = [p for p in found if keep(p.sighting) and p.fret >= min_fret
                  and not (hide_awkward and p.ergonomics.difficulty == StanceDifficulty.AWKWARD)]
         self.positions = sort_positions(found, self.combo_sort.currentData())
 
@@ -656,7 +739,7 @@ class ChordAtlasDialog(QDialog):
         frets = sorted({p.fret for p in self.positions})
         self.lbl_summary.setText(
             f"<b>{name}</b> on <b>{self.neck.name}</b>: <b>{len(self.positions)}</b> positions on "
-            f"{len(frets)} frets (0–{self.spin_max_fret.value()})"
+            f"{len(frets)} frets ({self.spin_min_fret.value()}–{self.spin_max_fret.value()})"
             f"{' — leaving out ' + ', '.join(sorted(omitted)) if omitted else ''}"
             f"{' — ' + only if only else ''}."
             + ("<br><b>No string groups match the grip settings.</b>" if not grips else ""))

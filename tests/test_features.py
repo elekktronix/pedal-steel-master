@@ -221,6 +221,224 @@ class MainWindowFeatureTests(unittest.TestCase):
         finally:
             w2.close()
 
+    def test_scale_finder_draws_numbered_scale_map(self):  # E-30
+        import core.settings as settings
+
+        w = self._window()
+        sf, canvas = w.scale_finder, w.canvas
+        self.assertEqual(canvas.scale_overlay, [])  # nothing drawn while the finder is hidden
+        pocket = set(canvas.active_pocket)
+
+        sf.show()
+        sf.set_fret_range(5, 8)
+        self.assertEqual((canvas.target_root, canvas.target_scale), ("G", "Major (Ionian)"))
+        self.assertEqual(canvas.box_highlight_range, (5, 8))
+        run = sf.active_box.ascending_run
+        self.assertTrue(run)
+        self.assertTrue(all(5 <= n.fret <= 8 for n, _ in canvas.scale_overlay))
+        self.assertEqual(sorted(s for _, s in canvas.scale_overlay if s is not None), list(range(len(run))))
+
+        sf.select_step(2)
+        self.assertEqual(canvas.overlay_active_step, 2)
+        self.assertEqual(canvas.bar_fret, run[2].fret)
+        self.assertEqual(canvas.engaged_levers, set(run[2].engaged_levers))
+        self.assertEqual(canvas.active_pocket, pocket)  # stepping no longer narrows the pocket
+
+        # Clicking a numbered circle jumps to its step.
+        canvas.resize(1200, 400)
+        board_w = canvas.width() - canvas.left_margin - canvas.right_margin
+        board_h = canvas.height() - canvas.top_margin - canvas.bottom_margin
+        geo = list(canvas._overlay_geometry(board_w / canvas.num_frets, board_h / (canvas.neck.string_count - 1)))
+        x, y, _, note, step = next(g for g in geo if g[4] == 4)
+        self.assertIs(canvas._overlay_hit(x, y)[0], note)
+        canvas.overlay_step_clicked.emit(step)  # what mousePressEvent emits for that hit
+        self.assertEqual(sf.active_step_idx, 4)
+
+        degree_btn = next(b for b in sf.label_group.buttons() if b.property("mode") == "degree")
+        degree_btn.setChecked(True)
+        self.assertEqual(canvas.overlay_label_mode, "degree")
+        self.assertEqual(settings.load_settings()["scale_overlay_label"], "degree")
+
+        # Phase 2: order options, role names, change column, tempo.
+        self.assertEqual(sf.table_staircase.rowCount(), len(run))
+        self.assertEqual(sf.table_staircase.item(0, 6).text(), "Start")
+        self.assertNotIn("P1", " ".join(sf.table_staircase.item(r, 5).text() for r in range(len(run))))
+        sf.direction_combo.setCurrentIndex(sf.direction_combo.findData("updown"))
+        self.assertEqual(len(sf.run), 2 * len(run) - 1)
+        self.assertEqual(len(canvas.overlay_run), len(sf.run))
+        sf.select_step(len(run))  # first step on the way back down
+        self.assertIs(canvas.overlay_run[canvas.overlay_active_step], run[-2])
+        sf.direction_combo.setCurrentIndex(sf.direction_combo.findData("down"))
+        self.assertEqual([n.midi_note for n in sf.run], sorted((n.midi_note for n in run), reverse=True))
+        sf.spin_tempo.setValue(120)
+        self.assertEqual(sf._walk_interval_ms(), 500)
+
+        sf.hide()
+        self.assertEqual(canvas.scale_overlay, [])
+        self.assertIsNone(canvas.box_highlight_range)
+
+    def test_scale_finder_learning_aids(self):  # E-30 phase 3
+        from PySide6.QtCore import QPoint, Qt
+        from PySide6.QtTest import QTest
+
+        from core.resolver import FretboardResolver
+
+        w = self._window()
+        sf, canvas = w.scale_finder, w.canvas
+        sf.show()
+        sf.set_fret_range(3, 6)
+        run = sf.run
+
+        # Degree legend: one chip per scale degree.
+        self.assertEqual(sf.degree_legend_layout.count(), 7)
+
+        # Whole neck: faint notes only outside the range, each one resolving to its pitch.
+        sf.cb_whole_neck.setChecked(True)
+        self.assertTrue(canvas.scale_ghost)
+        self.assertTrue(all(not (3 <= n.fret <= 6) for n in canvas.scale_ghost))
+        for n in canvas.scale_ghost[::7]:
+            st = next(s for s in FretboardResolver.resolve_neck_state(canvas.neck, n.fret, set(n.engaged_levers))
+                      if s.string_number == n.string_number)
+            self.assertEqual(st.active_midi, n.midi_note)
+        sf.cb_whole_neck.setChecked(False)
+        self.assertEqual(canvas.scale_ghost, [])
+
+        # Loop steps 3..5: transport wraps inside the loop, the canvas fades the rest.
+        sf.set_loop(3, 5)
+        self.assertEqual(sf.loop_bounds(), (2, 4))
+        self.assertEqual(canvas.overlay_loop_ids, {id(n) for n in run[2:5]})
+        seen = []
+        for _ in range(4):
+            sf.next_step()
+            seen.append(sf.active_step_idx)
+        self.assertEqual(seen, [2, 3, 4, 2])
+        # Play Run plays the loop one note per beat, lights each circle, and can be stopped.
+        w.audio.calls.clear()
+        sf._play_box_run()
+        self.assertTrue(sf.is_playing_run)
+        self.assertIn("Stop", sf.btn_play_run.text())
+        sf._play_tick()
+        sf._play_tick()
+        self.assertEqual(canvas.overlay_active_step, 4)
+        played = [c[2] for c in w.audio.calls if c[0] == "note"]
+        self.assertEqual(played, [n.midi_note for n in run[2:5]])
+        sf._play_tick()  # past the end: stops by itself
+        self.assertFalse(sf.is_playing_run)
+        self.assertIn("Play", sf.btn_play_run.text())
+        sf._play_box_run()
+        sf._play_box_run()  # second click = Stop Run
+        self.assertFalse(sf.is_playing_run)
+        self.assertEqual(canvas.overlay_active_step, sf.active_step_idx)
+
+        # Quiz, find the degree: circles go blank, the list hides, answers are scored.
+        sf._rng.seed(3)
+        sf.quiz_combo.setCurrentIndex(sf.quiz_combo.findData("name"))
+        self.assertTrue(canvas.overlay_quiz)
+        self.assertTrue(sf.table_staircase.isHidden())
+        target = sf.quiz_target
+        self.assertIn(target, run[2:5])
+        wrong = next(n for n in sf._overlay_notes if n.degree_label != target.degree_label)
+        sf.answer_quiz(wrong)
+        self.assertEqual(canvas.overlay_wrong, id(wrong))
+        self.assertEqual((sf.quiz_correct, sf.quiz_attempts), (0, 1))
+
+        # A real click on a matching circle (any octave of the degree counts).
+        canvas.resize(1200, 400)
+        board_w = canvas.width() - canvas.left_margin - canvas.right_margin
+        board_h = canvas.height() - canvas.top_margin - canvas.bottom_margin
+        geo = canvas._overlay_geometry(board_w / canvas.num_frets, board_h / (canvas.neck.string_count - 1))
+        x, y, _, right, _ = next(g for g in geo if g[3].degree_label == target.degree_label)
+        QTest.mouseClick(canvas, Qt.LeftButton, Qt.NoModifier, QPoint(int(x), int(y)))
+        self.assertEqual((sf.quiz_correct, sf.quiz_attempts, sf.quiz_streak), (1, 2, 1))
+        self.assertEqual(canvas.overlay_revealed,
+                         {id(n) for n in sf._overlay_notes if n.degree_label == target.degree_label})
+        self.assertTrue(sf.quiz_timer.isActive())
+        sf.answer_quiz(right)  # ignored while waiting for the next question
+        self.assertEqual(sf.quiz_attempts, 2)
+        sf.quiz_timer.stop()
+        sf._next_question()
+        self.assertNotEqual(sf.quiz_target.degree_label, target.degree_label)
+        self.assertEqual(canvas.overlay_revealed, set())
+
+        # Quiz by ear: the target is played and only that exact pitch is right.
+        w.audio.calls.clear()
+        sf.quiz_combo.setCurrentIndex(sf.quiz_combo.findData("ear"))
+        target = sf.quiz_target
+        self.assertIn(("note", None, target.midi_note), w.audio.calls)
+        octave = next((n for n in sf._overlay_notes
+                       if n.degree_label == target.degree_label and n.midi_note != target.midi_note), None)
+        if octave:
+            sf.answer_quiz(octave)
+            self.assertEqual(sf.quiz_correct, 0)
+        sf.answer_quiz(target)
+        self.assertEqual(sf.quiz_correct, 1)
+
+        sf.hide()  # ends the quiz and clears the fretboard
+        self.assertEqual(sf.quiz_mode, "off")
+        self.assertFalse(canvas.overlay_quiz)
+        self.assertEqual(canvas.scale_overlay, [])
+        self.assertTrue(sf.btn_next.isEnabled())
+
+    def test_scale_chord_link(self):  # E-31
+        from core.resolver import FretboardResolver
+        from core.stances import grip_matches_chord
+        from core.theory import NOTE_TO_SEMITONE
+
+        w = self._window()
+        sf, canvas = w.scale_finder, w.canvas
+        sf.show()
+        sf.set_fret_range(3, 6)  # G major
+        self.assertEqual(sf.triad_layout.count(), 7)
+        self.assertEqual(sf.seventh_layout.count(), 7)
+        for lay in (sf.triad_layout, sf.seventh_layout):  # no stale widgets left visible after a rebuild
+            self.assertTrue(all(lay.itemAt(i).widget().parent() is not None for i in range(lay.count())))
+
+        # Scale -> chord: ii (Am) rings A, C, E; every ringed circle really sounds a chord tone.
+        self.assertTrue(sf.select_chord("A", "Minor"))
+        am = {NOTE_TO_SEMITONE[n] for n in ("A", "C", "E")}
+        self.assertEqual(canvas.overlay_chord_pcs, am)
+        ringed = [n for n, _ in canvas.scale_overlay if n.midi_note % 12 in am]
+        self.assertTrue(ringed)
+        for n in ringed:
+            st = next(s for s in FretboardResolver.resolve_neck_state(canvas.neck, n.fret, set(n.engaged_levers))
+                      if s.string_number == n.string_number)
+            self.assertIn(st.pitch_class, am)
+
+        # ... and Find voicings opens the Chord Atlas on Am in the same frets.
+        sf.btn_find_chord.click()
+        dlg = w._atlas_dlg
+        self.assertEqual((dlg.combo_find_root.currentText(), dlg.combo_find_type.currentText()), ("A", "Minor"))
+        self.assertEqual((dlg.spin_min_fret.value(), dlg.spin_max_fret.value()), (3, 6))
+        self.assertTrue(dlg.positions)
+        self.assertTrue(all(3 <= p.fret <= 6 for p in dlg.positions))
+        for p in dlg.positions[:10]:
+            self.assertTrue(grip_matches_chord(canvas.neck, p.fret, p.sighting.controllers, p.sighting.strings,
+                                               "A", "Minor", require_root=False))
+
+        # Chord -> scale: "Scales that fit" lists G Mixolydian for G7 and opens it around the voicing.
+        dlg.set_find_target("G", "Dominant 7th")
+        dlg.set_find_fret_range(0, 15)
+        dlg.table_pos.selectRow(0)
+        fret = dlg.positions[0].fret
+        dlg._fill_scales_menu()
+        actions = {a.text().split("   ")[0]: a for a in dlg.scales_menu.actions() if a.isEnabled() and a.text()}
+        self.assertIn("G Mixolydian (Dominant)", actions)
+        self.assertIn("C Major (Ionian)", actions)
+        sf.hide()
+        actions["G Mixolydian (Dominant)"].trigger()
+        self.assertTrue(sf.isVisible())
+        self.assertEqual((sf.root_combo.currentText(), sf.scale_combo.currentText()), ("G", "Mixolydian (Dominant)"))
+        lo = max(0, min(21, fret - 1))
+        self.assertEqual((sf.spin_from.value(), sf.spin_to.value()), (lo, lo + 3))
+        self.assertEqual((sf.selected_chord.symbol, sf.selected_chord.numeral), ("G7", "I7"))
+        self.assertEqual(canvas.overlay_chord_pcs, {7, 11, 2, 5})
+
+        # Clicking the selected chord again clears the rings.
+        btn = next(b for b in sf.chord_group.buttons() if b.isChecked())
+        btn.click()
+        self.assertIsNone(sf.selected_chord)
+        self.assertEqual(canvas.overlay_chord_pcs, set())
+
     def test_corrupt_session_is_ignored(self):  # E-12
         import core.session as session
 
