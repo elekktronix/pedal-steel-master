@@ -170,6 +170,29 @@ class FakeAudio:
         return lambda *a, **k: self.calls.append((name, a, k))
 
 
+class AppIconTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def test_icon_sizes_ico_and_splash(self):
+        import struct
+
+        from PySide6.QtGui import QIcon
+        from ui.app_icon import ICON_ICO, app_icon, render_icon_image, set_windows_app_id, splash_pixmap
+
+        sizes = sorted(s.width() for s in app_icon().availableSizes())
+        self.assertEqual(sizes, [16, 20, 24, 32, 48, 64, 128, 256])
+        img = render_icon_image(32)  # small variant: opaque in the middle, transparent corners
+        self.assertEqual(img.pixelColor(16, 16).alpha(), 255)
+        self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
+        reserved, kind, count = struct.unpack("<HHH", ICON_ICO.read_bytes()[:6])
+        self.assertEqual((reserved, kind, count), (0, 1, 8))
+        self.assertEqual(sorted(s.width() for s in QIcon(str(ICON_ICO)).availableSizes()), sizes)
+        self.assertFalse(splash_pixmap().isNull())
+        set_windows_app_id()  # must not raise on any platform
+
+
 class MainWindowFeatureTests(unittest.TestCase):
     def setUp(self):
         import core.session as session
@@ -438,6 +461,12 @@ class MainWindowFeatureTests(unittest.TestCase):
         btn.click()
         self.assertIsNone(sf.selected_chord)
         self.assertEqual(canvas.overlay_chord_pcs, set())
+
+    def test_windows_get_the_app_icon(self):
+        w = self._window()
+        self.assertFalse(QApplication.windowIcon().isNull())
+        self.assertFalse(w.windowIcon().isNull())
+        self.assertFalse(w.scale_finder.windowIcon().isNull())  # a separate top-level window inherits it too
 
     def _studio_window(self):
         w = self._window()

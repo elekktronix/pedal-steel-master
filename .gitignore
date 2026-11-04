@@ -14,6 +14,7 @@ __pycache__/
 *.onefile-build/
 dist/
 build/
+build_nuitka/
 *.exe
 
 # Real log files: may be sensitive. Keep them out of Git.

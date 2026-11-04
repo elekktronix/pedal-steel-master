@@ -1,0 +1,40 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Small-size variant of app_icon.svg (used for 16-32 px): fewer, bolder shapes. -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a4c86"/>
+      <stop offset="1" stop-color="#0e1a30"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#f0b25e"/>
+      <stop offset="1" stop-color="#b06a2a"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="256" height="256" rx="44" fill="url(#bg)"/>
+
+  <!-- front legs, pedal bar, two pedals -->
+  <rect x="30" y="140" width="22" height="98" rx="6" fill="#d9dee5"/>
+  <rect x="204" y="140" width="22" height="98" rx="6" fill="#d9dee5"/>
+  <rect x="40" y="206" width="176" height="16" rx="8" fill="#aeb6c0"/>
+  <rect x="96" y="176" width="28" height="40" rx="7" fill="#eef1f5"/>
+  <rect x="132" y="176" width="28" height="40" rx="7" fill="#eef1f5"/>
+
+  <!-- body front face -->
+  <rect x="8" y="104" width="240" height="46" rx="10" fill="url(#wood)"/>
+
+  <!-- top face, keyhead and changer -->
+  <path d="M8 108 L248 108 L228 50 L28 50 Z" fill="#2a2018"/>
+  <path d="M196 108 L248 108 L228 50 L182 50 Z" fill="#cfd5dd"/>
+
+  <!-- strings -->
+  <g stroke="#ffffff" stroke-linecap="round">
+    <line x1="30" y1="64" x2="200" y2="64" stroke-width="6"/>
+    <line x1="24" y1="80" x2="204" y2="80" stroke-width="7"/>
+    <line x1="18" y1="96" x2="210" y2="96" stroke-width="8"/>
+  </g>
+
+  <!-- tone bar -->
+  <line x1="118" y1="122" x2="130" y2="40" stroke="#1e242b" stroke-width="30" stroke-linecap="round"/>
+  <line x1="118" y1="122" x2="130" y2="40" stroke="#f4f6f9" stroke-width="22" stroke-linecap="round"/>
+</svg>

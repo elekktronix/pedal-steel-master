@@ -5,7 +5,8 @@ import sys
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QSplashScreen
+from ui.app_icon import app_icon, set_windows_app_id, splash_pixmap
 from ui.main_window import MainWindow
 
 LOG_FILE = Path.home() / ".psg_visualizer" / "app.log"
@@ -28,9 +29,16 @@ def configure_logging() -> None:
 
 def main():
     configure_logging()
+    set_windows_app_id()  # taskbar shows the app's icon, not python.exe's
     app = QApplication(sys.argv)
+    app.setApplicationName("Pedal Steel Master")
+    app.setWindowIcon(app_icon())  # inherited by every window and dialog
+    splash = QSplashScreen(splash_pixmap())
+    splash.show()
+    app.processEvents()
     window = MainWindow()
     window.show()
+    splash.finish(window)
     sys.exit(app.exec())
 
 

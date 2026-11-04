@@ -36,6 +36,7 @@ from core.session import load_session, save_session
 from core.settings import load_settings, save_settings
 from core.star_map_engine import ENHARMONIC_FLAT_NAMES, StarMapEngine, StarMapLandmark
 from core.voicing_solver import VoicingSolver
+from ui.app_icon import app_icon
 from ui.circle_of_fifths_widget import CircleOfFifthsWidget
 from ui.copedant_editor_dialog import CopedantEditorDialog
 from ui.fretboard_canvas import FretboardCanvas
@@ -58,6 +59,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("Pedal Steel Guitar Copedant & Voicing Visualizer")
+        if QApplication.windowIcon().isNull():  # main.py sets it; this covers other entry points
+            QApplication.setWindowIcon(app_icon())
         self.resize(1540, 920)
         self.setMinimumWidth(1180)
 

@@ -1,0 +1,99 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Pedal Steel Master app icon: a pedal steel guitar (body, strings, tone bar, legs, pedal rack). -->
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2a4c86"/>
+      <stop offset="1" stop-color="#0e1a30"/>
+    </linearGradient>
+    <linearGradient id="wood" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#e8a957"/>
+      <stop offset="1" stop-color="#9c5a22"/>
+    </linearGradient>
+    <linearGradient id="board" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2b2118"/>
+      <stop offset="1" stop-color="#46352a"/>
+    </linearGradient>
+    <linearGradient id="chrome" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#7d8794"/>
+      <stop offset="0.45" stop-color="#ffffff"/>
+      <stop offset="1" stop-color="#8a939f"/>
+    </linearGradient>
+    <linearGradient id="metal" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0" stop-color="#9aa3ae"/>
+      <stop offset="0.5" stop-color="#e9edf2"/>
+      <stop offset="1" stop-color="#7b8592"/>
+    </linearGradient>
+    <linearGradient id="changer" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#d7dce3"/>
+      <stop offset="1" stop-color="#8b95a2"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="8" y="8" width="240" height="240" rx="48" fill="url(#bg)"/>
+
+  <!-- back legs -->
+  <rect x="68" y="112" width="8" height="92" rx="3" fill="#5d6773"/>
+  <rect x="184" y="112" width="8" height="92" rx="3" fill="#5d6773"/>
+
+  <!-- pedal rods and pedal rack -->
+  <g stroke="#b9c1cb" stroke-width="3" stroke-linecap="round">
+    <line x1="106" y1="132" x2="106" y2="184"/>
+    <line x1="128" y1="132" x2="128" y2="184"/>
+    <line x1="150" y1="132" x2="150" y2="184"/>
+  </g>
+  <rect x="46" y="200" width="164" height="9" rx="4" fill="url(#metal)"/>
+  <g fill="url(#chrome)" stroke="#4a525c" stroke-width="1.5">
+    <rect x="97" y="180" width="18" height="24" rx="4"/>
+    <rect x="119" y="180" width="18" height="24" rx="4"/>
+    <rect x="141" y="180" width="18" height="24" rx="4"/>
+  </g>
+
+  <!-- front legs -->
+  <path d="M40 128 L52 128 L49 224 L37 224 Z" fill="url(#metal)"/>
+  <path d="M204 128 L216 128 L219 224 L207 224 Z" fill="url(#metal)"/>
+  <rect x="33" y="220" width="20" height="7" rx="3.5" fill="#3b424b"/>
+  <rect x="203" y="220" width="20" height="7" rx="3.5" fill="#3b424b"/>
+
+  <!-- body: front face -->
+  <rect x="22" y="98" width="212" height="34" rx="7" fill="url(#wood)"/>
+  <rect x="22" y="98" width="212" height="5" fill="#f4c27f" opacity="0.6"/>
+  <!-- knee levers -->
+  <rect x="84" y="130" width="7" height="13" rx="2" fill="#c3cad3"/>
+  <rect x="166" y="130" width="7" height="13" rx="2" fill="#c3cad3"/>
+
+  <!-- body: top face (fretboard) in perspective -->
+  <path d="M22 100 L234 100 L216 64 L40 64 Z" fill="url(#board)"/>
+  <!-- keyhead (left) and changer (right) -->
+  <path d="M22 100 L50 100 L62 64 L40 64 Z" fill="#1c1713"/>
+  <path d="M204 100 L234 100 L216 64 L192 64 Z" fill="url(#changer)"/>
+  <g fill="#c9ced6">
+    <circle cx="36" cy="94" r="2.6"/>
+    <circle cx="40" cy="85" r="2.4"/>
+    <circle cx="44" cy="77" r="2.2"/>
+    <circle cx="48" cy="69" r="2"/>
+  </g>
+
+  <!-- fret lines -->
+  <g stroke="#a08a6e" stroke-width="1.2" opacity="0.8">
+    <line x1="74" y1="100" x2="82" y2="64"/>
+    <line x1="98" y1="100" x2="102" y2="64"/>
+    <line x1="152" y1="100" x2="149" y2="64"/>
+    <line x1="176" y1="100" x2="170" y2="64"/>
+  </g>
+
+  <!-- strings -->
+  <g stroke="#f2f2f2" stroke-linecap="round">
+    <line x1="47" y1="68" x2="209" y2="68" stroke-width="1.1"/>
+    <line x1="45" y1="73" x2="211" y2="73" stroke-width="1.2"/>
+    <line x1="43" y1="78" x2="214" y2="78" stroke-width="1.3"/>
+    <line x1="40" y1="83" x2="216" y2="83" stroke-width="1.5"/>
+    <line x1="38" y1="88" x2="219" y2="88" stroke-width="1.7"/>
+    <line x1="35" y1="93" x2="221" y2="93" stroke-width="1.9"/>
+    <line x1="33" y1="97" x2="224" y2="97" stroke-width="2.1"/>
+  </g>
+
+  <!-- tone bar (steel) lying across the strings -->
+  <line x1="122" y1="106" x2="130" y2="60" stroke="#2c323a" stroke-width="13" stroke-linecap="round"/>
+  <line x1="122" y1="106" x2="130" y2="60" stroke="url(#chrome)" stroke-width="10" stroke-linecap="round"/>
+  <line x1="121" y1="102" x2="128" y2="63" stroke="#ffffff" stroke-width="2.2" stroke-linecap="round" opacity="0.9"/>
+</svg>
