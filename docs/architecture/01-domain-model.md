@@ -14,7 +14,7 @@ Neck
  ├─ half_stops:  List[HalfStopRule]         # (controller_id, string) -> intermediate delta
  ├─ splits:      List[SplitRule]            # (string, {controllers}) -> net delta override
  ├─ description, author, author_bio, social_media   # metadata only
- ├─ source_profile: str                     # profile file this neck is linked to ("" = none)
+ ├─ source_profile: str                     # legacy per-neck profile link; unused, cleared on load
  └─ changer_raises, changer_lowers: int     # changer configuration (E-26), default 3 up – 3 down
 StringPitch    { string_number, midi_note, note_name }   # note_name like "G#3" (sharps)
 CopedantChange { id, label, changes: Dict[string_number -> semitone_delta] }   # zero deltas omitted

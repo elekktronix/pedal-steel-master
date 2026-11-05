@@ -11,7 +11,7 @@ class MainMenuBuilder:
         # 1. File Menu
         file_menu = menubar.addMenu("&File")
 
-        action_import = QAction("&Import Setup (JSON)...", main_window)
+        action_import = QAction("&Import Setup as Profile (JSON)...", main_window)
         action_import.triggered.connect(main_window._load_file)
         file_menu.addAction(action_import)
 
@@ -66,7 +66,7 @@ class MainMenuBuilder:
 
         # 3. Copedant Menu
         copedant_menu = menubar.addMenu("&Copedant")
-        main_window.copedant_select_menu = copedant_menu.addMenu("&Select Copedant")
+        main_window.copedant_select_menu = copedant_menu.addMenu("&Select Tuning")
         main_window._rebuild_copedant_menu()
 
         copedant_menu.addSeparator()
@@ -75,6 +75,26 @@ class MainMenuBuilder:
         action_import_cop.setShortcut("Ctrl+I")
         action_import_cop.triggered.connect(main_window._open_import_copedant_file)
         copedant_menu.addAction(action_import_cop)
+
+        action_export_cop = QAction("&Export Current Copedant (.json)...", main_window)
+        action_export_cop.triggered.connect(main_window._export_current_copedant)
+        copedant_menu.addAction(action_export_cop)
+
+        copedant_menu.addSeparator()
+
+        action_profiles = QAction("&Profiles (open, save, import, export, startup)...", main_window)
+        action_profiles.triggered.connect(main_window._open_profile_manager)
+        copedant_menu.addAction(action_profiles)
+
+        action_browse = QAction("&Browse All Tunings...", main_window)
+        action_browse.triggered.connect(main_window._open_tuning_browser)
+        copedant_menu.addAction(action_browse)
+
+        action_startup = QAction("Open This &Tuning at Startup", main_window)
+        action_startup.triggered.connect(main_window._set_current_tuning_as_startup)
+        copedant_menu.addAction(action_startup)
+
+        copedant_menu.addSeparator()
 
         action_splits = QAction("Mechanical &Splits Manager...", main_window)
         action_splits.triggered.connect(main_window._open_splits_manager)

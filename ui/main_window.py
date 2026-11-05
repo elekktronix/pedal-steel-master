@@ -4,6 +4,7 @@
 
 import logging
 import time
+from copy import deepcopy
 from pathlib import Path
 from typing import Optional, Set
 
@@ -17,6 +18,7 @@ from PySide6.QtWidgets import (
     QFileDialog,
     QFrame,
     QHBoxLayout,
+    QInputDialog,
     QLabel,
     QMainWindow,
     QMessageBox,
@@ -29,9 +31,20 @@ from PySide6.QtWidgets import (
 )
 
 from core.audio import MidiAudioEngine, compute_newman_cents
-from core.models import Neck, NeckType, SteelGuitar, migrate_half_stop_tokens
-from core.presets import build_standard_d10_guitar
-from core.profile_manager import ProfileManager
+from core.models import Neck, NeckType
+from core.profile_manager import (
+    COPEDANT_FILE_FILTER,
+    FACTORY_PROFILE,
+    STARTUP_PROFILE,
+    ProfileManager,
+    export_neck,
+    factory_guitar,
+    load_startup_guitar,
+    profile_label,
+    read_necks_file,
+    same_tunings,
+    unique_neck_name,
+)
 from core.session import load_session, save_session
 from core.settings import load_settings, save_settings
 from core.star_map_engine import ENHARMONIC_FLAT_NAMES, StarMapEngine, StarMapLandmark
@@ -45,6 +58,7 @@ from ui.harmonic_target_panel import HarmonicTargetPanel
 from ui.lever_panel import LeverTogglePanel
 from ui.main_menu_builder import MainMenuBuilder
 from ui.manage_profiles_dialog import ProfileManagerDialog
+from ui.profile_prompts import choose_profile_name
 from ui.progression_studio_widget import ProgressionStudioWidget
 from ui.relative_moves_widget import RelativeMovesWidget
 from ui.scale_finder_widget import ScaleFinderWidget
@@ -76,24 +90,12 @@ class MainWindow(QMainWindow):
         self._sounding: dict = {}
         self._sounding_until = 0.0
 
-        # Load persisted guitar setup if present, otherwise build standard D10
-        storage_dir = ProfileManager.ensure_storage_dir() or getattr(
-            ProfileManager, "STORAGE_DIR", Path.home() / ".psg_visualizer" / "profiles"
-        )
-        active_setup_path = storage_dir / "active_guitar_setup.json"
-        if active_setup_path.exists():
-            try:
-                self.guitar = SteelGuitar.load_from_file(str(active_setup_path))
-            except Exception:
-                log.exception("Could not load %s; using factory presets", active_setup_path)
-                self.guitar = build_standard_d10_guitar()
-        else:
-            self.guitar = build_standard_d10_guitar()
-        # Persisted setups predate engagement-aware half-stop splits ("P3HS" -> "P3_HALF", D-08).
-        for neck in self.guitar.necks:
-            migrate_half_stop_tokens(neck)
-
-        self.current_neck_idx: int = 0
+        # The startup profile (Preferences / Profiles dialog), else the last session's setup
+        # (active_guitar_setup.json), else the factory profile. Half-stop tokens are migrated (D-08).
+        self.guitar, startup_tuning = load_startup_guitar(self.settings)
+        self.current_neck_idx: int = next(
+            (i for i, n in enumerate(self.guitar.necks) if startup_tuning and n.name == startup_tuning), 0)
+        self._startup_tuning_forced = bool(startup_tuning)
         self.stance_inspector_dlg = None
 
         self._init_ui()
@@ -103,6 +105,7 @@ class MainWindow(QMainWindow):
         self._apply_theme(self.settings.get("theme", "dark"))
         self._load_current_neck()
         self._refresh_copedant_dropdown()
+        self._refresh_profile_combo()
         self._update_star_map_ribbon()
         self._update_relative_moves_hub()
         self._restore_session(load_session())
@@ -112,6 +115,7 @@ class MainWindow(QMainWindow):
     # -------------------------------------------------------------------------
     def _capture_session(self) -> dict:
         return {
+            "profile": self.guitar.profile,
             "neck_index": self.current_neck_idx,
             "neck_name": self.guitar.necks[self.current_neck_idx].name,
             "fret": self.canvas.bar_fret,
@@ -138,8 +142,14 @@ class MainWindow(QMainWindow):
             )
             if by_name is not None:
                 idx = by_name
+            same_profile = session.get("profile", self.guitar.profile) == self.guitar.profile
+            if self._startup_tuning_forced or not same_profile:
+                idx = None  # the startup default tuning wins over the last session's tuning
             if isinstance(idx, int) and 0 <= idx < len(self.guitar.necks) and idx != self.current_neck_idx:
                 self._select_copedant_index(idx)
+            # The stance belongs to the session's tuning; skip it on another tuning.
+            restore_stance = same_profile and session.get("neck_name") in (
+                None, self.guitar.necks[self.current_neck_idx].name)
 
             root = session.get("target_root")
             if root == "None":
@@ -151,7 +161,7 @@ class MainWindow(QMainWindow):
                 self._set_display_mode(session["display_mode"])
 
             fret = session.get("fret")
-            if isinstance(fret, int):
+            if isinstance(fret, int) and restore_stance:
                 self.apply_stance(
                     max(0, min(24, fret)),
                     set(session.get("controllers") or []),
@@ -182,13 +192,28 @@ class MainWindow(QMainWindow):
         row1_bar = QHBoxLayout()
         row1_bar.setSpacing(6)
 
+        row1_bar.addWidget(QLabel("<b>Profile:</b>"))
+        self.combo_profile = QComboBox()
+        self.combo_profile.setMinimumWidth(150)
+        self.combo_profile.setToolTip("A profile is a group of tunings. Factory = the built-in default tunings.")
+        self.combo_profile.currentIndexChanged.connect(self._on_profile_combo_changed)
+        row1_bar.addWidget(self.combo_profile)
+
         row1_bar.addWidget(QLabel("<b>Tuning:</b>"))
         self.combo_copedant = QComboBox()
         self.combo_copedant.setMinimumWidth(220)
+        self.combo_copedant.setToolTip("The tunings (necks) of the open profile")
         self.combo_copedant.currentIndexChanged.connect(self._on_copedant_dropdown_changed)
         row1_bar.addWidget(self.combo_copedant)
 
-        self.btn_edit_copedant = QPushButton("⚙️ Matrix")
+        self.btn_browse_tunings = QPushButton("🔎")
+        self.btn_browse_tunings.setToolTip("Browse all tunings in every profile")
+        self.btn_browse_tunings.setStyleSheet("padding: 4px 8px;")
+        self.btn_browse_tunings.clicked.connect(self._open_tuning_browser)
+        row1_bar.addWidget(self.btn_browse_tunings)
+
+        self.btn_edit_copedant = QPushButton("⚙️ Copedant")
+        self.btn_edit_copedant.setToolTip("Edit the copedant of this tuning (strings, pedals, levers, splits, half-stops)")
         self.btn_edit_copedant.setStyleSheet("background-color: #343a40; color: white; font-weight: bold; padding: 4px 10px;")
         self.btn_edit_copedant.clicked.connect(self._open_copedant_editor)
         row1_bar.addWidget(self.btn_edit_copedant)
@@ -329,7 +354,42 @@ class MainWindow(QMainWindow):
         self.canvas.node_clicked.connect(self._on_node_clicked)
         root_layout.addWidget(self.canvas, stretch=6)
 
-        # 4. Permanent Up-The-Neck Navigator Ribbon
+        # Pedals, knee levers and pluck articulations (created first: its feasibility banner joins the bar row; placed as row 5)
+        self.lever_panel = LeverTogglePanel(self)
+        self.lever_panel.levers_changed.connect(self._on_levers_changed)
+        self.lever_panel.pinch_requested.connect(lambda: self._play_pocket(roll=False))
+        self.lever_panel.roll_requested.connect(lambda: self._play_pocket(roll=True))
+        self.lever_panel.arpeggiate_requested.connect(self._arpeggiate_active_pocket)
+        self.lever_panel.all_strings_requested.connect(
+            lambda: self._apply_pocket_preset(set(range(1, self.guitar.necks[self.current_neck_idx].string_count + 1)))
+        )
+        self.lever_panel.clear_pocket_requested.connect(lambda: self._apply_pocket_preset(set()))
+        # 4. Directly below the fretboard: bar position + mechanical feasibility, then 5. pedals/levers/pluck
+        fret_controls = QHBoxLayout()
+        fret_controls.addWidget(QLabel("<b>Bar Position (Fret):</b>"))
+
+        self.fret_slider = QSlider(Qt.Horizontal)
+        self.fret_slider.setRange(0, 24)
+        self.fret_slider.setValue(0)
+        self.fret_slider.setTickInterval(1)
+        self.fret_slider.setTickPosition(QSlider.TicksBelow)
+        fret_controls.addWidget(self.fret_slider, stretch=1)
+
+        self.fret_spin = QSpinBox()
+        self.fret_spin.setRange(0, 24)
+        self.fret_spin.setValue(0)
+        fret_controls.addWidget(self.fret_spin)
+
+        self.fret_slider.valueChanged.connect(self._on_bar_fret_changed)
+        self.fret_spin.valueChanged.connect(self._on_bar_fret_changed)
+        self.canvas.fret_changed.connect(self._on_bar_fret_changed)
+        fret_controls.addSpacing(12)
+        fret_controls.addWidget(self.lever_panel.feasibility_bar)
+        root_layout.addLayout(fret_controls, stretch=0)
+
+        root_layout.addWidget(self.lever_panel, stretch=0)
+
+        # 6. Permanent Up-The-Neck Navigator Ribbon
         self.star_map_box = QFrame()
         self.star_map_box.setStyleSheet("background-color: #212529; border-radius: 4px; padding: 2px;")
         star_map_h = QHBoxLayout(self.star_map_box)
@@ -385,43 +445,10 @@ class MainWindow(QMainWindow):
 
         root_layout.addWidget(self.star_map_box, stretch=0)
 
-        # 5. Same Fret Hub & Relative Move Assistant
+        # 7. Same Fret Hub & Relative Move Assistant
         self.relative_moves_widget = RelativeMovesWidget(self)
         self.relative_moves_widget.move_applied.connect(self._apply_relative_move)
         root_layout.addWidget(self.relative_moves_widget, stretch=0)
-
-        # 6. Bar Position Slider
-        fret_controls = QHBoxLayout()
-        fret_controls.addWidget(QLabel("<b>Bar Position (Fret):</b>"))
-
-        self.fret_slider = QSlider(Qt.Horizontal)
-        self.fret_slider.setRange(0, 24)
-        self.fret_slider.setValue(0)
-        self.fret_slider.setTickInterval(1)
-        self.fret_slider.setTickPosition(QSlider.TicksBelow)
-        fret_controls.addWidget(self.fret_slider, stretch=1)
-
-        self.fret_spin = QSpinBox()
-        self.fret_spin.setRange(0, 24)
-        self.fret_spin.setValue(0)
-        fret_controls.addWidget(self.fret_spin)
-
-        self.fret_slider.valueChanged.connect(self._on_bar_fret_changed)
-        self.fret_spin.valueChanged.connect(self._on_bar_fret_changed)
-        self.canvas.fret_changed.connect(self._on_bar_fret_changed)
-        root_layout.addLayout(fret_controls, stretch=0)
-
-        # 7. Pedals & Knee Levers + Inline Articulations + Feasibility Banner
-        self.lever_panel = LeverTogglePanel(self)
-        self.lever_panel.levers_changed.connect(self._on_levers_changed)
-        self.lever_panel.pinch_requested.connect(lambda: self._play_pocket(roll=False))
-        self.lever_panel.roll_requested.connect(lambda: self._play_pocket(roll=True))
-        self.lever_panel.arpeggiate_requested.connect(self._arpeggiate_active_pocket)
-        self.lever_panel.all_strings_requested.connect(
-            lambda: self._apply_pocket_preset(set(range(1, self.guitar.necks[self.current_neck_idx].string_count + 1)))
-        )
-        self.lever_panel.clear_pocket_requested.connect(lambda: self._apply_pocket_preset(set()))
-        root_layout.addWidget(self.lever_panel, stretch=0)
 
         # 8. Bottom Row: String Grips (Left) + Harmonic Target (Right)
         bottom_row = QHBoxLayout()
@@ -429,7 +456,7 @@ class MainWindow(QMainWindow):
 
         self.grip_bar = GripPocketBar(self)
         self.grip_bar.pocket_changed.connect(self._on_grip_bar_pocket_changed)
-        bottom_row.addWidget(self.grip_bar, stretch=3)
+        bottom_row.addWidget(self.grip_bar, stretch=1)
 
         self.harmonic_panel = HarmonicTargetPanel(self)
         self.harmonic_panel.target_changed.connect(self._on_harmonic_target_changed)
@@ -782,14 +809,6 @@ class MainWindow(QMainWindow):
         for idx, neck in enumerate(self.guitar.necks):
             self.combo_copedant.addItem(self._neck_display_name(neck), ("neck", idx))
 
-        user_profiles = ProfileManager.list_user_profiles()
-        if user_profiles:
-            sep_idx = self.combo_copedant.count()
-            self.combo_copedant.addItem("─── Saved User Profiles ───", None)
-            self.combo_copedant.model().item(sep_idx).setEnabled(False)
-            for p_name in user_profiles:
-                self.combo_copedant.addItem(f"📁 {p_name}", ("profile", p_name))
-
         self.combo_copedant.setCurrentIndex(min(self.current_neck_idx, len(self.guitar.necks) - 1))
         self.combo_copedant.blockSignals(False)
         self._rebuild_copedant_menu()
@@ -798,17 +817,14 @@ class MainWindow(QMainWindow):
         item_data = self.combo_copedant.currentData()
         if not item_data:
             return
-        kind, value = item_data
-        if kind == "neck":
-            self.current_neck_idx = value
-            self._load_current_neck()
-        elif kind == "profile":
-            self._load_named_profile(value)
+        _kind, value = item_data
+        self.current_neck_idx = value
+        self._load_current_neck()
+        self._rebuild_copedant_menu()
 
     @staticmethod
     def _neck_display_name(neck: Neck) -> str:
-        marker = "📁 " if neck.source_profile else ""
-        return f"{marker}{neck.name} ({neck.string_count} Str)"
+        return f"{neck.name} ({neck.string_count} Str)"
 
     def _rebuild_copedant_menu(self):
         if not hasattr(self, "copedant_select_menu"):
@@ -1260,9 +1276,10 @@ class MainWindow(QMainWindow):
             self.current_neck_idx = dialog.current_neck_idx
             self._on_copedant_modified()
         elif dialog.guitar_changed:
-            # Duplicate / Save-as-Profile added necks even though the dialog was cancelled.
+            # Duplicate added tunings even though the dialog was cancelled.
             self._save_active_guitar_setup()
             self._refresh_copedant_dropdown()
+            self._refresh_profile_combo()
 
     def _open_splits_manager(self):
         """Opens Copedant Editor focused directly on the Mechanical Splits tab."""
@@ -1283,6 +1300,7 @@ class MainWindow(QMainWindow):
     def _on_copedant_modified(self):
         self._save_active_guitar_setup()
         self._refresh_copedant_dropdown()
+        self._refresh_profile_combo()
         self._load_current_neck()
 
     def _open_stance_chord_inspector(self):
@@ -1350,50 +1368,49 @@ class MainWindow(QMainWindow):
 
     def _open_import_copedant_file(self):
         filepath, _ = QFileDialog.getOpenFileName(
-            self,
-            "Import Copedant File",
-            "",
-            "PSG Compass Copedant (*.cop *.json);;All Files (*.*)",
-        )
+            self, "Import Copedant File", "", COPEDANT_FILE_FILTER)
         if not filepath:
             return
 
         try:
-            import json
-            with open(filepath, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            # Exported copedants, profiles, PSG Compass files and full setups (every neck is added).
+            # Imported necks are new entries, not linked to any profile file.
+            new_necks = read_necks_file(filepath)
+        except Exception as e:
+            log.exception("Copedant import failed")
+            QMessageBox.critical(self, "Import Error", f"Failed to parse copedant file:\n{e}")
+            return
 
-            if "strings" in data and "pedals" in data:
-                new_neck = Neck.from_compass_json(data)
-            else:
-                new_neck = Neck.from_dict(data)
-            migrate_half_stop_tokens(new_neck)
-            # An imported copedant is a new entry, not linked to any existing profile file.
-            new_neck.source_profile = ""
-
+        for new_neck in new_necks:
             existing_names = [n.name for n in self.guitar.necks]
             base_name = new_neck.name
             counter = 1
             while new_neck.name in existing_names:
                 new_neck.name = f"{base_name} ({counter})"
                 counter += 1
-
             self.guitar.necks.append(new_neck)
-            self.current_neck_idx = len(self.guitar.necks) - 1
-            self._refresh_copedant_dropdown()
-            self._load_current_neck()
 
-            QMessageBox.information(
-                self,
-                "Copedant Imported",
-                f"Successfully loaded '{new_neck.name}' ({new_neck.string_count} Strings).",
-            )
+        self.current_neck_idx = len(self.guitar.necks) - len(new_necks)
+        self._save_active_guitar_setup()
+        self._refresh_copedant_dropdown()
+        self._load_current_neck()
+
+        loaded = ", ".join(f"'{n.name}' ({n.string_count} strings)" for n in new_necks)
+        QMessageBox.information(self, "Copedant Imported", f"Successfully loaded {loaded}.")
+
+    def _export_current_copedant(self):
+        neck = self.guitar.necks[self.current_neck_idx]
+        default = str(Path.home() / f"{ProfileManager.sanitize_name(neck.name) or 'copedant'}.json")
+        path, _ = QFileDialog.getSaveFileName(self, "Export Copedant", default, "Copedant JSON (*.json)")
+        if not path:
+            return
+        try:
+            export_neck(neck, path)
         except Exception as e:
-            QMessageBox.critical(
-                self,
-                "Import Error",
-                f"Failed to parse copedant file:\n{str(e)}",
-            )
+            log.exception("Copedant export failed")
+            QMessageBox.critical(self, "Export Error", f"Failed to save copedant file:\n{e}")
+            return
+        QMessageBox.information(self, "Copedant Exported", f"Saved '{neck.name}' to:\n{path}")
 
     def _open_pearls_dialog(self):
         from ui.pearls_widget import StringsOfPearlsDialog
@@ -1402,61 +1419,166 @@ class MainWindow(QMainWindow):
         dlg.step_selected.connect(self._on_star_map_dialog_selected)
         dlg.exec()
 
-    def _open_profile_manager(self):
-        neck = self.guitar.necks[self.current_neck_idx]
-        dlg = ProfileManagerDialog(current_neck=neck, parent=self)
-        dlg.profile_selected.connect(self._load_named_profile)
-        dlg.exec()
-        self._refresh_copedant_dropdown()
+    # -------------------------------------------------------------------------
+    # Profiles: groups of tunings (Factory or a user profile file)
+    # -------------------------------------------------------------------------
+    def _factory_modified(self) -> bool:
+        return self.guitar.profile == FACTORY_PROFILE and not same_tunings(self.guitar, factory_guitar())
 
-    def _load_named_profile(self, profile_name: str):
-        """Opens a user profile as its own neck entry. It never overwrites the active (e.g. factory)
-        neck; re-loading a profile that is already open refreshes that entry from disk (D-02)."""
+    def _refresh_profile_combo(self):
+        combo = self.combo_profile
+        combo.blockSignals(True)
+        combo.clear()
+        factory_text = "🏭 Factory" + (" (modified)" if self._factory_modified() else "")
+        combo.addItem(factory_text, FACTORY_PROFILE)
+        for name in ProfileManager.list_user_profiles():
+            combo.addItem(f"📁 {name}", name)
+        idx = combo.findData(self.guitar.profile)
+        combo.setCurrentIndex(max(0, idx))
+        combo.blockSignals(False)
+
+    def _on_profile_combo_changed(self, _index: int):
+        key = self.combo_profile.currentData()
+        if key is not None and key != self.guitar.profile:
+            self.switch_profile(key)
+
+    def _confirm_leave_profile(self) -> bool:
+        """Before the open setup is replaced: edits to factory tunings live only in the working
+        setup, so offer to save them as a user profile. Returns False if the user cancels."""
+        if not self._factory_modified():
+            return True
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Question)
+        box.setWindowTitle("Unsaved Factory Changes")
+        box.setText("You changed the Factory tunings. Save them as a user profile first?\n"
+                    "Otherwise the Factory profile goes back to its default tunings.")
+        btn_save = box.addButton("Save as Profile...", QMessageBox.AcceptRole)
+        btn_discard = box.addButton("Discard Changes", QMessageBox.DestructiveRole)
+        box.addButton(QMessageBox.Cancel)
+        box.setDefaultButton(btn_save)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is btn_discard:
+            return True
+        if clicked is btn_save:
+            return self._save_open_setup_as_profile() is not None
+        return False
+
+    def _save_open_setup_as_profile(self) -> Optional[str]:
+        name, ok = QInputDialog.getText(self, "Save as Profile", "Profile name:", text="My Profile")
+        if not ok:
+            return None
+        safe_name = ProfileManager.sanitize_name(name)
+        if not safe_name:
+            QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
+            return None
+        safe_name = choose_profile_name(self, safe_name)
+        if safe_name is None:
+            return None
         try:
-            loaded_neck = ProfileManager.load_user_profile(profile_name)
+            ProfileManager.save_profile(safe_name, self.guitar)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "Save Error", f"Failed to save profile:\n{e}")
+            return None
+        self._on_profile_saved_as(safe_name)
+        return safe_name
+
+    def _on_profile_saved_as(self, name: str):
+        """The open setup now belongs to user profile `name` (Save As / Rename)."""
+        self.guitar.profile = name
+        self.guitar.name = name
+        self._save_active_guitar_setup()
+        self._refresh_profile_combo()
+
+    def switch_profile(self, key: str, tuning_index: int = 0) -> bool:
+        """Opens profile `key` (FACTORY_PROFILE or a user profile name) and selects a tuning.
+        The open profile is saved first. Returns False if nothing changed."""
+        if key == self.guitar.profile:
+            self._select_copedant_index(tuning_index)
+            return True
+        if not self._confirm_leave_profile():
+            self._refresh_profile_combo()
+            return False
+        try:
+            guitar = ProfileManager.load_any_profile(key)
         except Exception as e:
-            QMessageBox.critical(self, "Profile Error", f"Failed to load profile '{profile_name}':\n{e}")
-            self._refresh_copedant_dropdown()
-            return
-        if not loaded_neck:
-            QMessageBox.warning(self, "Profile Not Found", f"Profile '{profile_name}' could not be found.")
-            self._refresh_copedant_dropdown()
-            return
-        migrate_half_stop_tokens(loaded_neck)
-
-        existing_idx = next(
-            (i for i, n in enumerate(self.guitar.necks) if n.source_profile == loaded_neck.source_profile),
-            None,
-        )
-        if existing_idx is None:
-            self.guitar.necks.append(loaded_neck)
-            self.current_neck_idx = len(self.guitar.necks) - 1
-        else:
-            self.guitar.necks[existing_idx] = loaded_neck
-            self.current_neck_idx = existing_idx
-
+            log.exception("Could not open profile %r", key)
+            QMessageBox.critical(self, "Profile Error", f"Failed to open profile '{key}':\n{e}")
+            guitar = None
+        if guitar is None or not guitar.necks:
+            if guitar is not None:
+                QMessageBox.warning(self, "Empty Profile", f"Profile '{key}' has no tunings.")
+            self._refresh_profile_combo()
+            return False
+        self._save_active_guitar_setup()  # writes the profile we are leaving
+        self.guitar = guitar
+        self.current_neck_idx = tuning_index if 0 <= tuning_index < len(guitar.necks) else 0
         self._save_active_guitar_setup()
         self._refresh_copedant_dropdown()
+        self._refresh_profile_combo()
+        self._load_current_neck()
+        return True
+
+    def _open_profile_manager(self):
+        dlg = ProfileManagerDialog(self.guitar, settings=self.settings, parent=self)
+        dlg.open_requested.connect(self.switch_profile)
+        dlg.saved_as.connect(self._on_profile_saved_as)
+        dlg.browse_requested.connect(self._open_tuning_browser)
+        self._save_active_guitar_setup()
+        dlg.exec()
+        self._refresh_profile_combo()
+
+    def _load_named_profile(self, profile_name: str):
+        self.switch_profile(profile_name)
+
+    def _open_tuning_browser(self):
+        from ui.tuning_browser_dialog import TuningBrowserDialog
+
+        self._save_active_guitar_setup()
+        dlg = TuningBrowserDialog(self.guitar, parent=self)
+        dlg.open_requested.connect(self.switch_profile)
+        dlg.copy_requested.connect(self._add_tuning_to_open_profile)
+        dlg.exec()
+
+    def _add_tuning_to_open_profile(self, neck: Neck):
+        copy = deepcopy(neck)
+        copy.source_profile = ""
+        copy.name = unique_neck_name(self.guitar, copy.name)
+        self.guitar.necks.append(copy)
+        self.current_neck_idx = len(self.guitar.necks) - 1
+        self._save_active_guitar_setup()
+        self._refresh_copedant_dropdown()
+        self._refresh_profile_combo()
         self._load_current_neck()
 
+    def _set_current_tuning_as_startup(self):
+        self.settings.update(
+            startup_mode=STARTUP_PROFILE,
+            startup_profile=self.guitar.profile,
+            startup_tuning=self.guitar.necks[self.current_neck_idx].name,
+        )
+        save_settings(self.settings)
+        QMessageBox.information(
+            self, "Startup Default",
+            f"The app will open profile '{profile_label(self.guitar.profile)}' with tuning "
+            f"'{self.guitar.necks[self.current_neck_idx].name}'.\n"
+            "Change this in Copedant > Profiles.")
+
     def _load_file(self):
-        path, _ = QFileDialog.getOpenFileName(self, "Import All Necks Setup", "", "JSON Files (*.json)")
+        """Import Setup: every neck of the file becomes a tuning of a new user profile, which opens."""
+        path, _ = QFileDialog.getOpenFileName(self, "Import Setup as Profile", "", COPEDANT_FILE_FILTER)
         if not path:
             return
         try:
-            guitar = SteelGuitar.load_from_file(path)
-            if not guitar.necks:
-                raise ValueError("The file contains no necks.")
+            name = ProfileManager.import_profile_file(path)
         except Exception as e:  # D-21
             log.exception("Setup import failed")
             QMessageBox.critical(self, "Import Error", f"Failed to load setup file:\n{e}")
             return
-        self.guitar = guitar
-        for neck in self.guitar.necks:
-            migrate_half_stop_tokens(neck)
-        self.current_neck_idx = 0
-        self._refresh_copedant_dropdown()
-        self._load_current_neck()
+        if self.switch_profile(name):
+            QMessageBox.information(self, "Setup Imported", f"Imported as profile '{name}'.")
+        else:
+            self._refresh_profile_combo()
 
     def _save_file(self):
         path, _ = QFileDialog.getSaveFileName(self, "Export All Necks Setup", "", "JSON Files (*.json)")
@@ -1475,12 +1597,19 @@ class MainWindow(QMainWindow):
             )
             active_setup_path = storage_dir / "active_guitar_setup.json"
             self.guitar.save_to_file(str(active_setup_path))
-            # Profile files are written by the copedant editor for profile-linked necks
-            # (Neck.source_profile); nothing to write back here.
         except Exception:
             log.exception("Error saving active guitar setup")
+        if self.guitar.profile:  # a user profile saves itself (Factory lives only in the working setup)
+            try:
+                ProfileManager.save_profile(self.guitar.profile, self.guitar)
+            except Exception:
+                log.exception("Error saving profile %r", self.guitar.profile)
 
     def closeEvent(self, event):
+        # Factory edits survive a restart only when the last session is resumed.
+        if self.settings.get("startup_mode") == STARTUP_PROFILE and not self._confirm_leave_profile():
+            event.ignore()
+            return
         save_session(self._capture_session())
         self._save_active_guitar_setup()
         if hasattr(self, "scale_finder"):

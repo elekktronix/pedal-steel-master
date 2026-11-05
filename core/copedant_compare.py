@@ -384,6 +384,23 @@ def _stance_pcs(neck: Neck, stance: Tuple[str, ...], fret: int) -> Dict[int, int
     return {s.string_number: s.active_midi for s in states}
 
 
+def has_idle_controller(
+    stance: Tuple[str, ...],
+    grip: Tuple[int, ...],
+    midis_by_stance: Dict[Tuple[str, ...], Dict[int, int]],
+) -> bool:
+    """True if some controller in `stance` changes nothing on the grip's strings: dropping it gives
+    a stance in `midis_by_stance` with the same resolved pitches on every grip string. Such a way
+    is a duplicate of that simpler stance (e.g. LKL held over a grip it doesn't touch). Pitches come
+    from the resolver, so split rules and half-stops are honoured; the simpler way is always kept."""
+    base = midis_by_stance[stance]
+    for c in stance:
+        sub = midis_by_stance.get(tuple(x for x in stance if x != c))
+        if sub is not None and all(sub.get(s) == base[s] for s in grip):
+            return True
+    return False
+
+
 def scan_chords(
     neck: Neck,
     fret: int = REFERENCE_FRET,
@@ -397,8 +414,9 @@ def scan_chords(
     stances = stances if stances is not None else candidate_stances(neck)
     memo: Dict[Tuple[FrozenSet[int], int], List[Tuple[int, str, bool]]] = {}
     out: Dict[Tuple[int, str], Set[ChordSighting]] = {}
+    all_midis = {st: _stance_pcs(neck, st, fret) for st in stances}
     for st in stances:
-        midi_by_str = _stance_pcs(neck, st, fret)
+        midi_by_str = all_midis[st]
         for grip in grips:
             if any(s not in midi_by_str for s in grip):
                 continue
@@ -407,6 +425,8 @@ def scan_chords(
             mk = (pcs, len(grip))
             if mk not in memo:
                 memo[mk] = _match_pcs(pcs, len(grip), lookup)
+            if memo[mk] and has_idle_controller(st, grip, all_midis):
+                continue
             for root_pc, ctype, is_shell in memo[mk]:
                 root_at_fret0 = (root_pc - fret) % 12
                 out.setdefault((root_at_fret0, ctype), set()).add(

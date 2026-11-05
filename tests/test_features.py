@@ -146,7 +146,9 @@ class PearlsTests(unittest.TestCase):  # D-34
 class ProfileNamingTests(unittest.TestCase):  # D-38
     def test_unique_profile_name(self):
         with tempfile.TemporaryDirectory() as d, mock.patch.object(ProfileManager, "STORAGE_DIR", Path(d)):
-            ProfileManager.save_user_profile("BE E9 Copy", presets.build_be_e9_3p_5kl_1hs())
+            from core.models import SteelGuitar
+
+            ProfileManager.save_profile("BE E9 Copy", SteelGuitar("x", [presets.build_be_e9_3p_5kl_1hs()]))
             self.assertEqual(ProfileManager.unique_profile_name("BE E9 (Copy)"), "BE E9 Copy 2")
             self.assertEqual(ProfileManager.unique_profile_name("Fresh"), "Fresh")
 

@@ -139,8 +139,11 @@ class LeverTogglePanel(QWidget):
         root_vbox.setContentsMargins(0, 0, 0, 0)
         root_vbox.setSpacing(4)
 
-        # Stance Feasibility Banner without dedicated edit buttons
-        feasibility_row = QHBoxLayout()
+        # Stance Feasibility Banner. A separate widget, so the host can place it elsewhere
+        # (MainWindow puts it on the bar-position row).
+        self.feasibility_bar = QWidget(self)
+        feasibility_row = QHBoxLayout(self.feasibility_bar)
+        feasibility_row.setContentsMargins(0, 0, 0, 0)
         feasibility_row.setSpacing(8)
 
         self.lbl_feasibility_title = QLabel("<b>Mechanical Feasibility:</b>")
@@ -159,17 +162,17 @@ class LeverTogglePanel(QWidget):
         """)
         feasibility_row.addWidget(self.lbl_feasibility_badge)
 
-        lbl_hint = QLabel("<small style='color: #8b92a0;'>[1-Click: Half-Stop (Amber) | 2-Click: Full-Stop (Green/Blue)]</small>")
-        feasibility_row.addWidget(lbl_hint)
+        hint = "Pedals and levers: 1 click = half-stop (amber), 2 clicks = full (green/blue)"
+        self.lbl_feasibility_badge.setToolTip(hint)
 
-        feasibility_row.addStretch()
-        root_vbox.addLayout(feasibility_row)
+        root_vbox.addWidget(self.feasibility_bar)
 
         controls_row = QHBoxLayout()
         controls_row.setSpacing(6)
 
         # Foot Pedals Box
         self.pedal_box = QGroupBox("Foot Pedals")
+        self.pedal_box.setToolTip(hint)
         self.pedal_box.setStyleSheet("QGroupBox { font-weight: bold; font-size: 11px; }")
         self.pedal_layout = QHBoxLayout(self.pedal_box)
         self.pedal_layout.setContentsMargins(8, 4, 8, 6)
@@ -178,6 +181,7 @@ class LeverTogglePanel(QWidget):
 
         # Knee Levers Box
         self.lever_box = QGroupBox("Knee Levers")
+        self.lever_box.setToolTip(hint)
         self.lever_box.setStyleSheet("QGroupBox { font-weight: bold; font-size: 11px; }")
         self.lever_layout = QHBoxLayout(self.lever_box)
         self.lever_layout.setContentsMargins(8, 4, 8, 6)

@@ -7,10 +7,12 @@
 | `~/.psg_visualizer/app_settings.json` | `core/settings.save_settings` on every preference toggle | `MainWindow.__init__` (falls back once to the legacy, now untracked `<repo>/app_settings.json`) | `{theme, show_inversions, show_scale_box, show_nashville, use_newman_tuning, pedal_swells, note_spelling, key_aware_spelling, perm_click_sound, perm_click_mode, studio_click_sound, studio_count_in}` (`note_spelling` = `"sharps"`/`"flats"`, applied with `theory.set_accidental_preference` at startup; `key_aware_spelling` (default true) with `theory.set_key_aware_spelling`) |
 | `~/.psg_visualizer/session.json` | `MainWindow.closeEvent` (`core/session.save_session`) | `MainWindow.__init__` (`load_session`; an unreadable file is ignored with a warning) | neck, fret, controllers, pocket, target, display mode, geometry/state (base64), `studio_visible` (falls back to the old `sequencer_visible`), `studio` (the Progression Studio's progression, `StudioProgression.to_dict`; stances are kept only on the same neck) |
 | `~/.psg_visualizer/app.log` (+ rotations) | `logging` (configured in `main.py`) | you | INFO and above, including tracebacks of handled errors |
-| `~/.psg_visualizer/profiles/active_guitar_setup.json` | `MainWindow.closeEvent`, `_on_copedant_modified`, editor `_persist_active_guitar` | `MainWindow.__init__` (falls back to presets on any exception) | `SteelGuitar` |
-| `~/.psg_visualizer/profiles/<name>.json` | editor Apply (linked necks only), Duplicate, Save-as; Profiles dialog Save | profile combo, Profiles dialog | single `Neck` (with `source_profile`) |
+| `~/.psg_visualizer/profiles/active_guitar_setup.json` | `MainWindow._save_active_guitar_setup` (close, copedant edits, profile switch), editor `_persist_active_guitar` | `load_startup_guitar` when resuming the last session (falls back to Factory on any exception) | `SteelGuitar` with `profile` = the open profile ("" = Factory) |
+| `~/.psg_visualizer/profiles/<name>.json` | `MainWindow._save_active_guitar_setup` while that profile is open; Profiles dialog Save As / Rename / Import; editor Copy to Profile; File → Import Setup | Profile selector, Profiles dialog, Tuning Browser, startup | `SteelGuitar` (all the profile's tunings). Legacy files with one `Neck` load as a one-tuning profile and are rewritten on the next save |
 | User-chosen `*.json` | File → Export Setup | File → Import Setup | `SteelGuitar` |
-| User-chosen `*.cop / *.json` | — | Copedant → Import | `Neck` or PSG Compass JSON |
+| User-chosen `*.json` (one copedant) | Copedant → Export Current Copedant (`export_neck`) | Copedant → Import; Profiles dialog → Import | single `Neck.to_dict()` with `source_profile` blanked |
+| User-chosen `*.json` (one profile) | Profiles dialog → Export (`ProfileManager.export_profile`) | Profiles dialog → Import; File → Import Setup as Profile | `SteelGuitar` with `profile` blanked |
+| User-chosen `*.cop / *.json` | — | Copedant → Import (adds tunings to the open profile); Profiles dialog → Import and File → Import Setup (create one new profile) | read by `profile_manager.read_necks_file`: a single `Neck`, a full setup (`necks` list; every neck is taken) or PSG Compass JSON |
 | User-chosen `*.cp / *.json / *.cprog` | Progression Studio Save | Progression Studio Load ▸ Open file | `.cp` measures/slots (readable by the old format) plus a `studio` block with the exact steps (`StudioProgression.to_dict`) |
 | User-chosen `*.pdf` | File → Export PDF | — | ReportLab sheet |
 | `%TEMP%/psg_metronome_chirp_{hi,lo}.wav` | `MetronomeChirp` (first use) | `QSoundEffect` | generated clicks |
@@ -20,15 +22,21 @@
 - Load and save errors are logged, and the app continues with the defaults.
 
 ### Profile rules
-- File name = `ProfileManager.sanitize_name` (`[alnum space _ -]`, stripped). Empty names and `active_guitar_setup` raise `ValueError`. Different names can still collide after sanitizing (`"BE E9 (Copy)"` → `"BE E9 Copy"`). The Profiles dialog and the editor's Save-as ask before overwriting; Apply on a linked neck overwrites its own file.
-- `list_user_profiles` = every `*.json` except `active_guitar_setup.json`.
-- Loading a profile **adds a linked neck entry** (`source_profile`, shown with 📁) and never overwrites another neck (rule C-11). The link is persisted in `active_guitar_setup.json`. Edits reach the profile file through editor Apply.
+- A **profile** is a group of tunings (`SteelGuitar`). **Factory** (`FACTORY_PROFILE = ""`, `factory_guitar()`) is the presets in `core/presets.py` and is never written to a profile file. **User profiles** are `<name>.json` files. The main window's **Profile** selector switches profiles; the **Tuning** selector lists only the open profile's tunings.
+- File name = `ProfileManager.sanitize_name` (`[alnum space _ -]`, stripped). Empty names and `active_guitar_setup` raise `ValueError`. Different names can still collide after sanitizing (`"BE E9 (Copy)"` → `"BE E9 Copy"`). Save As asks before overwriting (`choose_profile_name`); Rename refuses a taken name.
+- `list_user_profiles` = every `*.json` except `active_guitar_setup.json`, sorted case-insensitively.
+- **Saving:** the open user profile is written whenever the working setup is (`MainWindow._save_active_guitar_setup`): after copedant edits, before switching profiles and on close. Factory edits are kept only in `active_guitar_setup.json`; the selector shows "Factory (modified)", and switching away (or closing while a startup profile is set) offers Save as Profile / Discard / Cancel.
+- **Import / export (JSON only):** `read_necks_file` detects the format (Compass = `strings` + `pedals`; setup = `necks` list; neck = `open_tuning`), migrates half-stop tokens, and clears `source_profile`; anything else raises `ValueError`. `ProfileManager.import_profile_file` puts every neck of the file into **one** new profile under `unique_profile_name` and **never overwrites** a profile. Copedant → Import adds the necks to the open profile.
+- **Tuning Browser** (🔎 next to the Tuning selector, Copedant → Browse All Tunings): every tuning of every profile (`list_all_tunings`; the open profile shows its live tunings). Open switches to that profile and tuning; Add to Open Profile copies the tuning in under a unique name (`unique_neck_name`).
+- `add_tuning_to_profile(name, neck)` (editor Copy to Profile) appends a copy to another user profile, creating it if needed.
 
 ### Startup / shutdown
+Settings `startup_mode` (`"last"` / `"profile"`), `startup_profile` (`""` = Factory) and `startup_tuning` (neck name) choose what opens. They are set in the Profiles dialog ("At startup") or with Copedant → Open This Tuning at Startup. A forced startup tuning wins over the session's tuning, and the session stance is restored only on the session's own profile and tuning.
 ```
 startup:  ensure ~/.psg_visualizer/profiles → load settings → MidiAudioEngine()
-          → active_guitar_setup.json ? load : build_standard_d10_guitar()
-          → current_neck_idx = 0 → build UI → menu → theme → load neck
+          → load_startup_guitar(settings): startup profile ? open it
+                                             : active_guitar_setup.json ? load : factory_guitar()
+          → current_neck_idx = startup tuning or 0 → build UI → menu → theme → load neck
 shutdown: save active_guitar_setup.json → close pop-outs → audio.close()
 ```
 The last session (neck, stance, target, window layout) is restored at startup (E-12), and the Newman temperament flag is applied.

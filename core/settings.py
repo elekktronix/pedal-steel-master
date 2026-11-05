@@ -29,6 +29,9 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     "perm_click_mode": "Every note",   # or "Beat 1 only"
     "studio_click_sound": "Woodblock", # Progression Studio click (CLICK_SOUNDS key or "Off")
     "studio_count_in": 1,              # Progression Studio count-in bars (0-2)
+    "startup_mode": "last",            # "last" = resume the last session, "profile" = open startup_profile
+    "startup_profile": "",             # profile opened when startup_mode == "profile" ("" = Factory)
+    "startup_tuning": "",              # tuning (neck name) selected in that profile ("" = the first)
 }
 
 

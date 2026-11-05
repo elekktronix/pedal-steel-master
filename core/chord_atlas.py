@@ -17,6 +17,7 @@ from core.copedant_compare import (
     all_grips,
     candidate_stances,
     chord_group,
+    has_idle_controller,
     scan_chords,
     sighting_sort_key,
 )
@@ -165,6 +166,8 @@ def find_chord(
                     continue
                 if len(rel) < min(len(need), len(grip)) - (1 if targets[rel] else 0):
                     continue
+                if has_idle_controller(st, grip, atlas.stance_midis):
+                    break  # a lever that doesn't touch the grip: the simpler stance already has it
                 lowest = min(ms)
                 sighting = ChordSighting(r, chord_type, st, grip, targets[rel], (lowest - r) % 12)
                 ordered = sorted(ms)

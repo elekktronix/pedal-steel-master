@@ -140,18 +140,66 @@ class ControllerRemapTests(unittest.TestCase):
 
 
 class ProfileManagerTests(TempProfileDirMixin, unittest.TestCase):
-    def test_save_load_links_profile(self):
-        neck = presets.build_standard_c6_10()
-        ProfileManager.save_user_profile("My C6", neck)
-        loaded = ProfileManager.load_user_profile("My C6")
-        self.assertEqual(loaded.source_profile, "My C6")
-        self.assertEqual(ProfileManager.list_user_profiles(), ["My C6"])
+    def test_profile_holds_several_tunings(self):
+        from core.models import SteelGuitar
+
+        guitar = SteelGuitar("x", [presets.build_standard_emmons_e9_10(), presets.build_standard_c6_10()])
+        ProfileManager.save_profile("My D10", guitar)
+        loaded = ProfileManager.load_profile("My D10")
+        self.assertEqual(loaded.profile, "My D10")
+        self.assertEqual([n.name for n in loaded.necks], [n.name for n in guitar.necks])
+        for a, b in zip(loaded.necks, guitar.necks):
+            self.assertEqual(all_stance_notes(a), all_stance_notes(b))
+        self.assertEqual(ProfileManager.list_user_profiles(), ["My D10"])
+        self.assertEqual(guitar.profile, "")  # saving does not change the guitar
+
+    def test_legacy_single_neck_profile_loads_as_one_tuning(self):
+        import json
+
+        c6 = presets.build_standard_c6_10()
+        path = ProfileManager.ensure_storage_dir() / "Old C6.json"
+        path.write_text(json.dumps(c6.to_dict()), encoding="utf-8")
+        loaded = ProfileManager.load_profile("Old C6")
+        self.assertEqual(len(loaded.necks), 1)
+        self.assertEqual(all_stance_notes(loaded.necks[0]), all_stance_notes(c6))
 
     def test_invalid_names_are_rejected(self):
-        neck = presets.build_standard_c6_10()
+        from core.models import SteelGuitar
+
+        guitar = SteelGuitar("x", [presets.build_standard_c6_10()])
         for bad in ("", "!!!", "active_guitar_setup"):
             with self.subTest(name=bad), self.assertRaises(ValueError):
-                ProfileManager.save_user_profile(bad, neck)
+                ProfileManager.save_profile(bad, guitar)
+
+    def test_add_tuning_rename_and_list_all(self):
+        from core.profile_manager import FACTORY_PROFILE
+
+        e9 = presets.build_standard_emmons_e9_10()
+        self.assertEqual(ProfileManager.add_tuning_to_profile("Mine", e9), e9.name)
+        self.assertEqual(ProfileManager.add_tuning_to_profile("Mine", e9), f"{e9.name} (2)")
+        self.assertEqual(ProfileManager.rename_profile("Mine", "Gig Rig"), "Gig Rig")
+        self.assertEqual(ProfileManager.list_user_profiles(), ["Gig Rig"])
+        tunings = dict(ProfileManager.list_all_tunings())
+        self.assertEqual(len(tunings[FACTORY_PROFILE]), len(presets.build_standard_d10_guitar().necks))
+        self.assertEqual(len(tunings["Gig Rig"]), 2)
+
+    def test_startup_profile_and_tuning(self):
+        from core.profile_manager import FACTORY_PROFILE, load_startup_guitar
+        from core.models import SteelGuitar
+
+        ProfileManager.save_profile("Gig", SteelGuitar("x", [presets.build_standard_emmons_e9_10(),
+                                                             presets.build_standard_c6_10()]))
+        guitar, tuning = load_startup_guitar(
+            {"startup_mode": "profile", "startup_profile": "Gig", "startup_tuning": "10-String C6"})
+        self.assertEqual((guitar.profile, tuning), ("Gig", "10-String C6"))
+        # A missing startup profile falls back to the last session, then to Factory.
+        guitar, tuning = load_startup_guitar({"startup_mode": "profile", "startup_profile": "Gone"})
+        self.assertEqual((guitar.profile, tuning), (FACTORY_PROFILE, ""))
+        # The last session remembers which profile was open.
+        saved = ProfileManager.load_profile("Gig")
+        saved.save_to_file(str(ProfileManager.active_setup_path()))
+        guitar, _ = load_startup_guitar({"startup_mode": "last"})
+        self.assertEqual(guitar.profile, "Gig")
 
 
 # ---------------------------------------------------------------------------
@@ -240,33 +288,149 @@ class CopedantEditorTests(TempProfileDirMixin, unittest.TestCase):
         dlg._apply_and_close()
         self.assertEqual(ProfileManager.list_user_profiles(), [])
 
-    def test_apply_on_linked_neck_updates_its_profile(self):  # D-02 / D-22
+    def test_duplicate_adds_a_tuning_to_the_open_profile(self):
         guitar = presets.build_standard_d10_guitar()
-        linked = deepcopy(guitar.necks[1])
-        linked.source_profile = "My C6"
-        guitar.necks.append(linked)
-        dlg = self._editor(guitar, len(guitar.necks) - 1)
-        dlg.edit_author.setText("Me")
-        dlg._apply_and_close()
-        self.assertEqual(ProfileManager.load_user_profile("My C6").author, "Me")
-        self.assertEqual(guitar.necks[1].author, presets.build_standard_c6_10().author)
+        n_before = len(guitar.necks)
+        dlg = self._editor(guitar, 1)
+        dlg._duplicate_copedant()
+        self.assertEqual(len(guitar.necks), n_before + 1)
+        self.assertEqual(guitar.necks[-1].name, f"{guitar.necks[1].name} (Copy)")
+        self.assertEqual(ProfileManager.list_user_profiles(), [])
+        items = [dlg.combo_copedant.itemText(i) for i in range(dlg.combo_copedant.count())]
+        self.assertEqual(len(items), n_before + 1)  # only the open profile's tunings
 
 
 @unittest.skipUnless(HAVE_QT, "PySide6 not available")
 class ProfileDialogTests(TempProfileDirMixin, unittest.TestCase):
-    def test_save_profile_does_not_crash_and_leaves_active_neck(self):  # D-20
+    def test_save_profile_does_not_crash_and_leaves_open_setup(self):  # D-20
+        from PySide6.QtWidgets import QInputDialog
         from ui.manage_profiles_dialog import ProfileManagerDialog
 
-        neck = presets.build_standard_emmons_e9_10()
-        before = neck.to_dict()
-        dlg = ProfileManagerDialog(current_neck=neck)
+        guitar = presets.build_standard_d10_guitar()
+        before = [n.to_dict() for n in guitar.necks]
+        dlg = ProfileManagerDialog(guitar, settings={})
         self.addCleanup(_delete_widget, dlg)
-        dlg.txt_profile_name.setText("My E9")
-        with mock.patch.object(QMessageBox, "information"):
+        saved = []
+        dlg.saved_as.connect(saved.append)
+        with mock.patch.object(QInputDialog, "getText", return_value=("My Setup", True)), \
+                mock.patch.object(QMessageBox, "information"):
             dlg._save_profile()
-        self.assertEqual(ProfileManager.list_user_profiles(), ["My E9"])
-        self.assertEqual(ProfileManager.load_user_profile("My E9").source_profile, "My E9")
-        self.assertEqual(neck.to_dict(), before)
+        self.assertEqual(ProfileManager.list_user_profiles(), ["My Setup"])
+        self.assertEqual(len(ProfileManager.load_profile("My Setup").necks), len(guitar.necks))
+        self.assertEqual(saved, ["My Setup"])
+        self.assertEqual([n.to_dict() for n in guitar.necks], before)
+
+    def test_startup_controls_write_settings(self):
+        import core.settings as settings
+        from ui.manage_profiles_dialog import ProfileManagerDialog
+
+        guitar = presets.build_standard_d10_guitar()
+        prefs = {}
+        with mock.patch.object(settings, "SETTINGS_FILE", Path(self._tmp.name) / "s.json"), \
+                mock.patch.object(settings, "SETTINGS_DIR", Path(self._tmp.name)), \
+                mock.patch("ui.manage_profiles_dialog.save_settings") as save:
+            dlg = ProfileManagerDialog(guitar, settings=prefs)
+            self.addCleanup(_delete_widget, dlg)
+            dlg.radio_profile.setChecked(True)
+            dlg.combo_startup_tuning.setCurrentIndex(1)
+        self.assertTrue(save.called)
+        self.assertEqual(prefs["startup_mode"], "profile")
+        self.assertEqual(prefs["startup_profile"], "")
+        self.assertEqual(prefs["startup_tuning"], guitar.necks[1].name)
+
+
+def all_stance_notes(neck: Neck):
+    """Sounding note of every string under no controller, each controller, and each half-stop and
+    split combination, through the resolver (so a round trip is checked musically)."""
+    stances = [set()] + [{c} for c in list(neck.pedals) + list(neck.knee_levers)]
+    stances += [{f"{h.controller_id}_HALF"} for h in neck.half_stops if h.is_active]
+    stances += [set(s.controllers) for s in neck.splits]
+    return [[(st.string_number, st.active_midi) for st in
+             FretboardResolver.resolve_neck_state(neck, 3, stance)] for stance in stances]
+
+
+class CopedantFileTests(TempProfileDirMixin, unittest.TestCase):
+    """Export / import of single copedants and profiles (JSON, `Neck.to_dict`)."""
+
+    def _path(self, name):
+        return Path(self._tmp.name) / name
+
+    def test_export_import_round_trip_sounds_the_same(self):
+        from core.profile_manager import export_neck, read_necks_file
+
+        for neck in presets.build_standard_d10_guitar().necks:
+            with self.subTest(neck=neck.name):
+                neck.source_profile = "Local Link"
+                path = self._path("cop.json")
+                export_neck(neck, path)
+                (back,) = read_necks_file(path)
+                self.assertEqual(back.source_profile, "")
+                expected = neck.to_dict()
+                expected["source_profile"] = ""
+                self.assertEqual(back.to_dict(), expected)
+                self.assertEqual(all_stance_notes(back), all_stance_notes(neck))
+
+    def test_reads_setup_files_and_rejects_others(self):
+        import json
+        from core.profile_manager import read_necks_file
+
+        guitar = presets.build_standard_d10_guitar()
+        guitar.save_to_file(str(self._path("setup.json")))
+        self.assertEqual([n.name for n in read_necks_file(self._path("setup.json"))],
+                         [n.name for n in guitar.necks])
+        for bad in ([1, 2], {"hello": 1}, {"necks": []}):
+            self._path("bad.json").write_text(json.dumps(bad), encoding="utf-8")
+            with self.assertRaises(ValueError):
+                read_necks_file(self._path("bad.json"))
+
+    def test_import_profile_file_never_overwrites(self):
+        from core.models import SteelGuitar
+
+        e9 = presets.build_standard_emmons_e9_10()
+        safe = ProfileManager.sanitize_name(e9.name)
+        ProfileManager.save_profile(safe, SteelGuitar("x", [e9]))
+        ProfileManager.export_profile(safe, self._path("e9.json"))
+        name = ProfileManager.import_profile_file(self._path("e9.json"))
+        self.assertEqual(name, f"{safe} 2")
+        (imported,) = ProfileManager.load_profile(name).necks
+        self.assertEqual(all_stance_notes(imported), all_stance_notes(e9))
+        self.assertEqual(len(ProfileManager.list_user_profiles()), 2)
+
+        # A full setup becomes one profile holding every tuning.
+        guitar = presets.build_standard_d10_guitar()
+        guitar.save_to_file(str(self._path("setup.json")))
+        name = ProfileManager.import_profile_file(self._path("setup.json"))
+        self.assertEqual(name, "setup")
+        self.assertEqual(len(ProfileManager.load_profile(name).necks), len(guitar.necks))
+        with self.assertRaises(FileNotFoundError):
+            ProfileManager.export_profile("Nope", self._path("x.json"))
+
+
+@unittest.skipUnless(HAVE_QT, "PySide6 not available")
+class ProfileDialogFileTests(TempProfileDirMixin, unittest.TestCase):
+    def test_dialog_import_and_export_buttons(self):
+        from PySide6.QtWidgets import QFileDialog, QMessageBox
+        from core.profile_manager import export_neck
+        from ui.manage_profiles_dialog import ProfileManagerDialog
+
+        src = Path(self._tmp.name) / "c6.json"
+        c6 = presets.build_standard_c6_10()
+        export_neck(c6, src)
+        dlg = ProfileManagerDialog(presets.build_standard_d10_guitar(), settings={})
+        self.addCleanup(_delete_widget, dlg)
+        with mock.patch.object(QFileDialog, "getOpenFileName", return_value=(str(src), "")),                 mock.patch.object(QMessageBox, "information"):
+            dlg._import_profiles()
+        name = ProfileManager.sanitize_name(c6.name)
+        self.assertEqual(ProfileManager.list_user_profiles(), [name])
+        self.assertEqual(dlg._selected_key(), name)
+        self.assertEqual(dlg.list_tunings.count(), 1)
+
+        out = Path(self._tmp.name) / "out.json"
+        with mock.patch.object(QFileDialog, "getSaveFileName", return_value=(str(out), "")),                 mock.patch.object(QMessageBox, "information"):
+            dlg._export_selected()
+        from core.profile_manager import read_necks_file
+        (back,) = read_necks_file(out)
+        self.assertEqual(all_stance_notes(back), all_stance_notes(c6))
 
 
 if __name__ == "__main__":

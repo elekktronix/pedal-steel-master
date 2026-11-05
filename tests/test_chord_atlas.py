@@ -59,6 +59,37 @@ class AtlasEngineTests(unittest.TestCase):
                                                            NOTE_NAMES_SHARP[e.root_pc], e.chord_type),
                                         (e.chord_type, e.root_pc, s))
 
+    def test_no_way_holds_a_lever_that_changes_nothing(self):
+        """A controller that doesn't move any grip string makes a duplicate way (C on C6 5-3-2
+        was listed with LKL, LKR, RKR, P4, P8 ...). Checked through the resolver, atlas and Find."""
+        from core.chord_atlas import find_chord
+        from core.copedant_compare import _stance_pcs
+
+        def idle(neck, s):
+            base = _stance_pcs(neck, s.controllers, 0)
+            for c in s.controllers:
+                sub = _stance_pcs(neck, tuple(x for x in s.controllers if x != c), 0)
+                if all(sub[n] == base[n] for n in s.strings):
+                    return c
+            return None
+
+        for builder in (presets.build_standard_emmons_e9_10, presets.build_standard_c6_10,
+                        presets.build_be_e9_3p_5kl_1hs, presets.build_be_c6_5p_4kl):
+            neck, a = atlas(builder)
+            with self.subTest(neck=neck.name):
+                ways = {s for e in a.entries for s in e.sightings}
+                ways |= {p.sighting for r in ("C", "G", "F") for t in ("Major", "Minor", "Dominant 7th")
+                         for p in find_chord(a, r, t)}
+                for s in ways:
+                    self.assertIsNone(idle(neck, s), s)
+
+        neck, a = atlas(presets.build_standard_c6_10)
+        c = [p for p in find_chord(a, "C", "Major") if p.sighting.strings == (5, 3, 2)]
+        self.assertEqual({p.sighting.controllers for p in c}, {()})
+        self.assertIn(ChordSighting(0, "Major", (), (5, 3, 2)), entry(a, 0, "Major").sightings)
+        _, e9 = atlas(presets.build_standard_emmons_e9_10)
+        self.assertIn(ChordSighting(9, "Major", ("P1", "P2"), (8, 6, 5)), entry(e9, 9, "Major").sightings)
+
     def test_known_e9_chords(self):
         _, a = atlas(presets.build_standard_emmons_e9_10)
         e_major = entry(a, 4, "Major")
@@ -201,19 +232,32 @@ class FindModeTests(unittest.TestCase):  # E-28
 
     def test_covers_every_exact_voicing_of_the_old_finder(self):
         """Every voicing the old VoicingSolver found that sounds every chord tone is found here too.
-        (It also listed incomplete grips, e.g. a plain B triad as "B7"; Find mode does not.)"""
+        (It also listed incomplete grips, e.g. a plain B triad as "B7"; Find mode does not. It also
+        listed levers that don't touch the grip; those are compared as the simpler stance.)"""
         from core.chord_atlas import find_chord
+        from core.copedant_compare import has_idle_controller
         from core.stances import grip_pitch_classes
         from core.theory import CHORD_FORMULAS, NOTE_TO_SEMITONE
         from core.voicing_solver import VoicingSolver
 
         neck, a = atlas(presets.build_standard_emmons_e9_10)
+
+        def simplest(stance, grip):
+            while has_idle_controller(stance, grip, a.stance_midis):
+                base = a.stance_midis[stance]
+                stance = next(sub for c in stance
+                              for sub in [tuple(x for x in stance if x != c)]
+                              if sub in a.stance_midis
+                              and all(a.stance_midis[sub][n] == base[n] for n in grip))
+            return stance
+
         for root, ctype in (("G", "Major"), ("B", "Dominant 7th"), ("C#", "Minor")):
             ours = {(p.fret, p.sighting.controllers, p.sighting.strings) for p in find_chord(a, root, ctype)}
             for m in VoicingSolver.find_all_voicings(neck, root, ctype, max_fret=15):
                 tones = {(NOTE_TO_SEMITONE[root] + k) % 12 for k in CHORD_FORMULAS[ctype]}
                 if grip_pitch_classes(neck, m.fret, m.engaged_levers, m.grip_strings) == tones:
-                    key = (m.fret, tuple(sorted(m.engaged_levers)), tuple(sorted(m.grip_strings, reverse=True)))
+                    grip = tuple(sorted(m.grip_strings, reverse=True))
+                    key = (m.fret, simplest(tuple(sorted(m.engaged_levers)), grip), grip)
                     self.assertIn(key, ours, (root, ctype))
 
 

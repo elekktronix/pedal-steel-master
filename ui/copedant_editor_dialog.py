@@ -53,8 +53,7 @@ from core.models import (
     migrate_legacy_ids,
     shift_pedal_ids,
 )
-from core.profile_manager import ProfileManager
-from ui.profile_prompts import choose_profile_name
+from core.profile_manager import ProfileManager, unique_neck_name
 from core.theory import NOTE_NAMES_SHARP, midi_to_note_name, note_to_midi
 
 log = logging.getLogger(__name__)
@@ -125,7 +124,7 @@ class CopedantEditorDialog(QDialog):
 
         # 1. Top Bar: Active Copedant Selector & Persistence Actions
         top_bar = QHBoxLayout()
-        top_bar.addWidget(QLabel("<b>Active Copedant:</b>"))
+        top_bar.addWidget(QLabel("<b>Tuning:</b>"))
 
         self.combo_copedant = QComboBox()
         self.combo_copedant.setMinimumWidth(260)
@@ -136,14 +135,16 @@ class CopedantEditorDialog(QDialog):
             self.combo_copedant.addItem(f"{self.neck.name} ({self.neck.string_count} Str)", 0)
         top_bar.addWidget(self.combo_copedant)
 
-        self.btn_duplicate = QPushButton("📄 Duplicate as Copy")
+        self.btn_duplicate = QPushButton("📄 Duplicate Tuning")
+        self.btn_duplicate.setToolTip("Add a copy of this tuning to the open profile")
         self.btn_duplicate.setStyleSheet("padding: 5px 12px; font-weight: bold;")
         self.btn_duplicate.clicked.connect(self._duplicate_copedant)
         top_bar.addWidget(self.btn_duplicate)
 
-        self.btn_save_profile = QPushButton("💾 Save as Profile")
+        self.btn_save_profile = QPushButton("📤 Copy to Profile...")
+        self.btn_save_profile.setToolTip("Add a copy of this tuning (with your edits) to another user profile")
         self.btn_save_profile.setStyleSheet("padding: 5px 12px; font-weight: bold; background-color: #0d6efd; color: white;")
-        self.btn_save_profile.clicked.connect(self._save_explicit_profile)
+        self.btn_save_profile.clicked.connect(self._copy_to_profile)
         top_bar.addWidget(self.btn_save_profile)
 
         self.btn_compare = QPushButton("🔍 Compare to Saved")
@@ -1194,109 +1195,62 @@ class CopedantEditorDialog(QDialog):
         self._load_neck_data()
 
     def _duplicate_copedant(self):
+        """Adds a copy of this tuning (with unapplied edits) to the open profile."""
         if not self.guitar:
             return
         self._sync_ui_to_neck()
-
         base_name = self.neck.name.replace(" (Copy)", "")
-        existing_names = {n.name for n in self.guitar.necks} | set(ProfileManager.list_user_profiles())
-        counter = 1
-        new_name = f"{base_name} (Copy)"
-        while new_name in existing_names or ProfileManager.sanitize_name(new_name) in existing_names:
-            counter += 1
-            new_name = f"{base_name} (Copy {counter})"
-
         copy_neck = deepcopy(self.neck)
-        copy_neck.name = new_name
-        copy_neck.source_profile = ProfileManager.sanitize_name(new_name)
-        try:
-            ProfileManager.save_user_profile(copy_neck.source_profile, copy_neck)
-        except (OSError, ValueError) as e:
-            QMessageBox.critical(self, "Duplicate Failed", f"Could not save the duplicate profile:\n{e}")
-            return
-
+        copy_neck.name = unique_neck_name(self.guitar, f"{base_name} (Copy)")
+        copy_neck.source_profile = ""
         self._append_neck_and_switch(copy_neck)
         self._persist_active_guitar()
-        QMessageBox.information(self, "Copedant Duplicated", f"Duplicated and saved '{new_name}' to user profiles.")
 
-    def _save_explicit_profile(self):
-        name, ok = QInputDialog.getText(
-            self,
-            "Save Copedant Profile",
-            "Enter profile name:",
-            text=self.neck.source_profile or self.edit_name.text().strip() or self.neck.name,
-        )
+    def _copy_to_profile(self):
+        """Appends a copy of this tuning to another user profile (chosen or new)."""
+        self._sync_ui_to_neck()
+        open_profile = self.guitar.profile if self.guitar else None
+        choices = [p for p in ProfileManager.list_user_profiles() if p != open_profile]
+        new_item = "➕ New profile..."
+        name, ok = QInputDialog.getItem(
+            self, "Copy Tuning to Profile", f"Add '{self.neck.name}' to profile:",
+            choices + [new_item], 0, False)
         if not ok:
             return
-        safe_name = ProfileManager.sanitize_name(name)
-        if not safe_name:
-            QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
-            return
-        if self.neck.source_profile != safe_name:  # saving over this neck's own profile needs no prompt
-            safe_name = choose_profile_name(self, safe_name)
-            if safe_name is None:
+        if name == new_item:
+            name, ok = QInputDialog.getText(self, "New Profile", "Profile name:", text=self.neck.name)
+            if not ok:
                 return
-
-        self._sync_ui_to_neck()
-
-        if self.neck.source_profile == safe_name:
-            # This neck is already linked to the profile: save it in place.
-            ProfileManager.save_user_profile(safe_name, self.neck)
-        else:
-            # Save a linked copy as a new neck entry; the original (e.g. a factory preset) is untouched (D-02).
-            profile_neck = deepcopy(self.neck)
-            profile_neck.name = safe_name
-            profile_neck.source_profile = safe_name
-            ProfileManager.save_user_profile(safe_name, profile_neck)
-            if self.guitar:
-                self._append_neck_and_switch(profile_neck)
-                self._persist_active_guitar()
-        QMessageBox.information(self, "Profile Saved", f"Successfully saved '{safe_name}' to disk.")
+            safe_name = ProfileManager.sanitize_name(name)
+            if not safe_name:
+                QMessageBox.warning(self, "Invalid Name", "Profile names must contain letters or digits.")
+                return
+            if ProfileManager.profile_exists(safe_name) or safe_name == open_profile:
+                QMessageBox.warning(self, "Profile Exists", f"A profile named '{safe_name}' already exists.")
+                return
+            name = safe_name
+        try:
+            tuning_name = ProfileManager.add_tuning_to_profile(name, self.neck)
+        except (OSError, ValueError) as e:
+            QMessageBox.critical(self, "Copy Failed", f"Could not save to profile '{name}':\n{e}")
+            return
+        QMessageBox.information(self, "Tuning Copied", f"Added '{tuning_name}' to profile '{name}'.")
 
     def _rebuild_copedant_combo(self):
-        """Necks of the guitar, then the saved user profiles that are not open as a neck yet (D-42).
-        Item data: ("neck", index) or ("profile", name)."""
+        """The tunings of the open profile. Item data: ("neck", index)."""
         combo = self.combo_copedant
         combo.blockSignals(True)
         combo.clear()
         for idx, n in enumerate(self.guitar.necks):
-            marker = "📁 " if n.source_profile else ""
-            combo.addItem(f"{marker}{n.name} ({n.string_count} Str)", ("neck", idx))
-        linked = {n.source_profile for n in self.guitar.necks if n.source_profile}
-        profiles = [p for p in ProfileManager.list_user_profiles() if p not in linked]
-        if profiles:
-            combo.addItem("─── Saved User Profiles ───", None)
-            combo.model().item(combo.count() - 1).setEnabled(False)
-            for name in profiles:
-                combo.addItem(f"📁 {name}", ("profile", name))
+            combo.addItem(f"{n.name} ({n.string_count} Str)", ("neck", idx))
         sel = next((i for i in range(combo.count()) if combo.itemData(i) == ("neck", self.current_neck_idx)), 0)
         combo.setCurrentIndex(sel)
         combo.blockSignals(False)
 
     def _on_copedant_combo_changed(self, _row: int):
         data = self.combo_copedant.currentData()
-        if not data:
-            return
-        kind, value = data
-        if kind == "neck":
-            self._on_switch_copedant(value)
-        else:
-            self._open_profile_in_editor(value)
-
-    def _open_profile_in_editor(self, name: str):
-        """Loads a saved profile as a new neck entry (same rule as MainWindow._load_named_profile)."""
-        try:
-            neck = ProfileManager.load_user_profile(name)
-        except Exception as e:  # noqa: BLE001 - surface any read/parse error to the user
-            neck = None
-            QMessageBox.critical(self, "Profile Error", f"Failed to load profile '{name}':\n{e}")
-        if neck is None:
-            self._rebuild_copedant_combo()
-            return
-        self._sync_ui_to_neck()
-        migrate_legacy_ids(neck)
-        migrate_half_stop_tokens(neck)
-        self._append_neck_and_switch(neck)
+        if data:
+            self._on_switch_copedant(data[1])
 
     def _on_switch_copedant(self, idx: int):
         if self.guitar and 0 <= idx < len(self.guitar.necks):
@@ -1362,15 +1316,7 @@ class CopedantEditorDialog(QDialog):
         else:
             self.original_neck.__dict__.update(self.neck.__dict__)
 
-        # Only profile-linked necks are written back to a profile file; factory/imported necks
-        # persist through active_guitar_setup.json (D-22).
-        applied = self._working.values() if self.guitar else [self.neck]
-        for working_neck in applied:
-            if working_neck.source_profile:
-                try:
-                    ProfileManager.save_user_profile(working_neck.source_profile, working_neck)
-                except (OSError, ValueError) as e:
-                    QMessageBox.warning(self, "Profile Save Failed", f"Could not update profile:\n{e}")
+        # The open profile's file is written by MainWindow._save_active_guitar_setup (D-22).
         self._persist_active_guitar()
 
         self.neck_updated.emit()

@@ -139,27 +139,27 @@ class EditorProfileListTests(TempProfileDirMixin, unittest.TestCase):  # D-42
         from PySide6.QtWidgets import QApplication
         cls.app = QApplication.instance() or QApplication([])
 
-    def test_saved_profiles_are_listed_and_open_as_a_neck(self):
+    def test_copy_to_profile_adds_the_edited_tuning(self):
+        from PySide6.QtWidgets import QInputDialog, QMessageBox
+        from core.models import SteelGuitar
         from core.profile_manager import ProfileManager
         from ui.copedant_editor_dialog import CopedantEditorDialog
 
-        mine = presets.build_standard_emmons_e9_10()
-        mine.name = "My Rig"
-        ProfileManager.save_user_profile("My Rig", mine)
+        ProfileManager.save_profile("My Rig", SteelGuitar("x", [presets.build_standard_c6_10()]))
         guitar = presets.build_standard_d10_guitar()
         n_before = len(guitar.necks)
         dlg = CopedantEditorDialog(neck=guitar.necks[0], guitar=guitar, current_neck_idx=0)
         self.addCleanup(_delete_widget, dlg)
         items = [dlg.combo_copedant.itemText(i) for i in range(dlg.combo_copedant.count())]
-        self.assertIn("📁 My Rig", items)
-        dlg.combo_copedant.setCurrentIndex(items.index("📁 My Rig"))
-        self.assertEqual(len(guitar.necks), n_before + 1)
-        self.assertEqual(guitar.necks[-1].source_profile, "My Rig")
-        self.assertEqual(dlg.current_neck_idx, n_before)
-        self.assertTrue(dlg.guitar_changed)
-        items = [dlg.combo_copedant.itemText(i) for i in range(dlg.combo_copedant.count())]
-        self.assertNotIn("📁 My Rig", items[n_before + 1:])  # now listed as a neck, not as a profile
-        self.assertEqual(dlg.combo_copedant.currentData(), ("neck", n_before))
+        self.assertEqual(len(items), n_before)  # the editor lists only the open profile's tunings
+        dlg.edit_author.setText("Edited")
+        with mock.patch.object(QInputDialog, "getItem", return_value=("My Rig", True)), \
+                mock.patch.object(QMessageBox, "information"):
+            dlg._copy_to_profile()
+        rig = ProfileManager.load_profile("My Rig")
+        self.assertEqual(len(rig.necks), 2)
+        self.assertEqual(rig.necks[-1].author, "Edited")
+        self.assertEqual(len(guitar.necks), n_before)  # the open profile is unchanged
 
 
 if __name__ == "__main__":

@@ -536,14 +536,21 @@ def detect_potential_half_stops(neck: Neck) -> List[HalfStopRule]:
 
 @dataclass
 class SteelGuitar:
+    """A profile: a named group of necks (tunings). `profile` is the user-profile file it belongs
+    to, or "" for the built-in factory profile (see core/profile_manager.py)."""
     name: str
     necks: List[Neck]
+    profile: str = ""
 
-    def save_to_file(self, filepath: str) -> None:
-        payload = {
+    def to_dict(self) -> dict:
+        return {
             "name": self.name,
+            "profile": self.profile,
             "necks": [neck.to_dict() for neck in self.necks],
         }
+
+    def save_to_file(self, filepath: str) -> None:
+        payload = self.to_dict()
         with open(filepath, "w", encoding="utf-8") as f:
             json.dump(payload, f, indent=2)
 
@@ -552,4 +559,4 @@ class SteelGuitar:
         with open(filepath, "r", encoding="utf-8") as f:
             data = json.load(f)
         necks = [Neck.from_dict(n) for n in data["necks"]]
-        return cls(name=data["name"], necks=necks)
+        return cls(name=data["name"], necks=necks, profile=str(data.get("profile", "")))
