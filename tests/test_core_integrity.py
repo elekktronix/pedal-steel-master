@@ -356,9 +356,10 @@ class CopedantFileTests(TempProfileDirMixin, unittest.TestCase):
         return Path(self._tmp.name) / name
 
     def test_export_import_round_trip_sounds_the_same(self):
-        from core.profile_manager import export_neck, read_necks_file
+        from core.profile_manager import export_neck, factory_guitar, read_necks_file
 
-        for neck in presets.build_standard_d10_guitar().necks:
+        # The factory profile is already migrated (VL -> LKV, B1), so import changes no IDs.
+        for neck in factory_guitar().necks:
             with self.subTest(neck=neck.name):
                 neck.source_profile = "Local Link"
                 path = self._path("cop.json")

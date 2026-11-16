@@ -224,6 +224,10 @@ class PermutationTrainerDialog(QDialog):
             " min-height: 34px; padding: 0 20px; border-radius: 4px; }"
         )
 
+    def set_neck(self, neck: Neck):
+        """Follows the active neck: an editor Apply replaces the Neck object (B7)."""
+        self.neck = neck
+
     def _rebuild_lanes(self):
         while self.deck_layout.count():
             item = self.deck_layout.takeAt(0)
@@ -345,7 +349,10 @@ class PermutationTrainerDialog(QDialog):
         if audio is not None and canvas is not None:
             match_state = next((s for s in canvas.active_states if s.string_number == ev.string_number), None)
             if match_state:
-                audio.play_note(match_state.active_midi, match_state.string_number)
+                s_num = match_state.string_number
+                cents_fn = getattr(self.parent_window, "_current_cents", None)  # Newman cents (A10)
+                cents = cents_fn([s_num]).get(s_num, 0.0) if cents_fn else 0.0
+                audio.play_note(match_state.active_midi, s_num, cents_offset=cents)
 
         self._reset_lane_highlights()
         lane_idx = self.lane_index.get(ev.string_number)

@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from core.audio import MidiAudioEngine, compute_newman_cents
-from core.models import Neck, NeckType
+from core.models import Neck, NeckType, set_franklin_p1
 from core.profile_manager import (
     COPEDANT_FILE_FILTER,
     FACTORY_PROFILE,
@@ -47,8 +47,8 @@ from core.profile_manager import (
 )
 from core.session import load_session, save_session
 from core.settings import load_settings, save_settings
+from core.stances import controller_display_names
 from core.star_map_engine import ENHARMONIC_FLAT_NAMES, StarMapEngine, StarMapLandmark
-from core.voicing_solver import VoicingSolver
 from ui.app_icon import app_icon
 from ui.circle_of_fifths_widget import CircleOfFifthsWidget
 from ui.copedant_editor_dialog import CopedantEditorDialog
@@ -637,10 +637,15 @@ class MainWindow(QMainWindow):
         """
         self._batch_depth += 1
         try:
-            self.canvas.set_bar_fret(fret)
-            self._sync_fret_widgets(fret)
+            self._sync_fret_widgets(fret)  # also sets the canvas fret (B19)
             active = self.lever_panel.set_active_controllers(set(controllers))
             self.canvas.set_engaged_levers(active)
+            dropped = self.lever_panel.dropped_half_stops
+            if dropped:  # B3: a stored half-stop whose rule was removed or disabled
+                names = controller_display_names(self.guitar.necks[self.current_neck_idx])
+                listed = ", ".join(names.get(c, c) for c in sorted(dropped))
+                self.statusBar().showMessage(
+                    f"{listed} half-stop is not enabled on this copedant; it was left out.", 8000)
             if pocket is not None:
                 self._apply_pocket_preset(set(pocket))
             if banner is not None:
@@ -799,6 +804,8 @@ class MainWindow(QMainWindow):
             self._compare_dlg.set_active_neck(self.current_neck_idx, self.guitar)
         if getattr(self, "_atlas_dlg", None) is not None:  # E-27
             self._atlas_dlg.set_active_neck(self.current_neck_idx, self.guitar)
+        if getattr(self, "_perm_trainer", None) is not None:  # B7: never keep the replaced Neck
+            self._perm_trainer.set_neck(neck)
         self._update_relative_moves_hub()
         self._update_stance_inspector_if_open()
 
@@ -959,7 +966,7 @@ class MainWindow(QMainWindow):
         self.scale_finder.box_highlight_requested.connect(self.canvas.set_box_highlight)
         self.scale_finder.clear_highlight_requested.connect(self.canvas.clear_box_highlight)
         self.scale_finder.box_shading_toggled.connect(self._on_scale_box_preference_changed)
-        self.scale_finder.play_note_requested.connect(self.audio.play_note)
+        self.scale_finder.play_note_requested.connect(self._play_scale_note)
         self.scale_finder.target_changed.connect(self._on_scale_target_changed)
         # Scale map overlay (E-30)
         self.canvas.set_overlay_label_mode(self.scale_finder.overlay_label_mode())
@@ -1039,37 +1046,33 @@ class MainWindow(QMainWindow):
         self.settings["scale_overlay_label"] = mode
         save_settings(self.settings)
 
-    def _on_circle_chord_triggered(self, root: str, chord_type: str, add_to_sequencer: bool):
-        neck = self.guitar.necks[self.current_neck_idx]
-
-        all_matches = VoicingSolver.find_all_voicings(
-            neck=neck,
-            root_name=root,
-            chord_type=chord_type,
-            max_fret=15,
-            filter_awkward=True,
-        )
-        if not all_matches:
+    def _on_circle_chord_triggered(self, root: str, chord_type: str, add_to_sequencer: bool,
+                                   allowed: Optional[Set[str]] = None):
+        """Plays the voicing the button's cue shows: the same pick, honouring the "Movement Mechanics
+        Allowed" filter (A7). If no voicing passes the filter, nothing moves and the status bar says
+        why (the cue already reads "No Match")."""
+        picked = self.circle_widget.pick_voicing(root, chord_type, self.canvas.bar_fret,
+                                                 self.canvas.engaged_levers, self.canvas.active_pocket, allowed)
+        if picked is None:
+            self.statusBar().showMessage(
+                f"No {root} {chord_type} voicing reachable with the allowed movements.", 6000)
             return
-
-        chosen_match = None
-        if self.circle_widget.cb_lock_pocket.isChecked() and self.canvas.active_pocket:
-            pocket_matches = [
-                m for m in all_matches if set(m.grip_strings) == self.canvas.active_pocket
-            ]
-            if pocket_matches:
-                current_fret = self.canvas.bar_fret
-                pocket_matches.sort(key=lambda m: (abs(m.fret - current_fret), len(m.engaged_levers)))
-                chosen_match = pocket_matches[0]
-
-        if not chosen_match:
-            chosen_match = all_matches[0]
+        chosen_match, _movement = picked
 
         self.apply_stance(chosen_match.fret, chosen_match.engaged_levers, chosen_match.grip_strings)
 
         if add_to_sequencer:  # "Auto-add to Progression Studio"
             self.studio.add_chord_step(root, chord_type, chosen_match.fret,
                                        chosen_match.engaged_levers, chosen_match.grip_strings)
+
+    def _play_scale_note(self, midi: int, string_num: int, levers: list):
+        """A scale-finder note on its string's channel, with Newman cents for the note's own stance
+        when compensated tuning is on (A10)."""
+        cents = 0.0
+        if self.audio.use_compensated_temperament:
+            neck = self.guitar.necks[self.current_neck_idx]
+            cents = compute_newman_cents(neck, set(levers), [string_num]).get(string_num, 0.0)
+        self.audio.play_note(midi, string_num, cents_offset=cents)
 
     def _current_cents(self, strings) -> dict:
         """Newman compensated-tuning cents for the current stance (empty unless enabled and E9)."""
@@ -1144,6 +1147,7 @@ class MainWindow(QMainWindow):
         dlg = StarMapWidget(neck=self.guitar.necks[self.current_neck_idx], parent=self)
         dlg.landmark_selected.connect(self._on_star_map_dialog_selected)
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
 
     def _on_star_map_dialog_selected(self, fret: int, controllers: set, target_strings: set):
         self.apply_stance(fret, controllers, target_strings)
@@ -1159,6 +1163,7 @@ class MainWindow(QMainWindow):
         )
         dlg.grip_selected.connect(self._on_triad_grip_selected)
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
 
     def _on_triad_grip_selected(self, fret: int, controllers: set, strings: set, root: str, chord_type: str):
         self.harmonic_panel.set_target(root, chord_type)  # canvas labels the triad over the backing chord
@@ -1271,7 +1276,9 @@ class MainWindow(QMainWindow):
             initial_tab=initial_tab,
             parent=self,
         )
-        if dialog.exec() == QDialog.Accepted:
+        accepted = dialog.exec() == QDialog.Accepted
+        dialog.deleteLater()  # B6
+        if accepted:
             # Follow the neck the user was editing when they pressed Apply.
             self.current_neck_idx = dialog.current_neck_idx
             self._on_copedant_modified()
@@ -1292,10 +1299,12 @@ class MainWindow(QMainWindow):
     def _toggle_c6_menu_pedal_offset(self, checked: bool):
         neck = self.guitar.necks[self.current_neck_idx]
         if neck.neck_type == NeckType.C6 or "C6" in neck.name:
-            dlg = CopedantEditorDialog(neck=neck, guitar=self.guitar, current_neck_idx=self.current_neck_idx, parent=self)
-            dlg._toggle_c6_pedal_offset(checked)
-            dlg._apply_and_close()
-            self._on_copedant_modified()
+            # A core operation on a copy (B6): no hidden editor dialog, and views that cache per
+            # neck object see a new neck, as after an editor Apply.
+            edited = deepcopy(neck)
+            if set_franklin_p1(edited, checked):
+                self.guitar.necks[self.current_neck_idx] = edited
+                self._on_copedant_modified()
 
     def _on_copedant_modified(self):
         self._save_active_guitar_setup()
@@ -1351,6 +1360,7 @@ class MainWindow(QMainWindow):
         dlg = FlashcardDrillDialog(neck=neck, parent=self)
         dlg.landmark_verified.connect(self._on_star_map_dialog_selected)
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
 
     def _set_temperament(self, use_newman: bool):
         self.settings["use_newman_tuning"] = use_newman
@@ -1418,6 +1428,7 @@ class MainWindow(QMainWindow):
         dlg = StringsOfPearlsDialog(neck=neck, parent=self)
         dlg.step_selected.connect(self._on_star_map_dialog_selected)
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
 
     # -------------------------------------------------------------------------
     # Profiles: groups of tunings (Factory or a user profile file)
@@ -1458,6 +1469,7 @@ class MainWindow(QMainWindow):
         box.setDefaultButton(btn_save)
         box.exec()
         clicked = box.clickedButton()
+        box.deleteLater()  # B6
         if clicked is btn_discard:
             return True
         if clicked is btn_save:
@@ -1526,6 +1538,7 @@ class MainWindow(QMainWindow):
         dlg.browse_requested.connect(self._open_tuning_browser)
         self._save_active_guitar_setup()
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
         self._refresh_profile_combo()
 
     def _load_named_profile(self, profile_name: str):
@@ -1539,6 +1552,7 @@ class MainWindow(QMainWindow):
         dlg.open_requested.connect(self.switch_profile)
         dlg.copy_requested.connect(self._add_tuning_to_open_profile)
         dlg.exec()
+        dlg.deleteLater()  # B6: modal dialogs must not outlive their exec()
 
     def _add_tuning_to_open_profile(self, neck: Neck):
         copy = deepcopy(neck)
@@ -1590,20 +1604,24 @@ class MainWindow(QMainWindow):
             log.exception("Setup export failed")
             QMessageBox.critical(self, "Export Error", f"Failed to save setup file:\n{e}")
 
-    def _save_active_guitar_setup(self):
+    def _save_active_guitar_setup(self) -> bool:
+        """Writes active_guitar_setup.json and the open user profile (atomically, B8). A failure is
+        logged and shown once in the status bar instead of being lost. Returns True on success."""
+        failed = []
         try:
-            storage_dir = ProfileManager.ensure_storage_dir() or getattr(
-                ProfileManager, "STORAGE_DIR", Path.home() / ".psg_visualizer" / "profiles"
-            )
-            active_setup_path = storage_dir / "active_guitar_setup.json"
-            self.guitar.save_to_file(str(active_setup_path))
-        except Exception:
+            self.guitar.save_to_file(str(ProfileManager.active_setup_path()))
+        except Exception as e:
             log.exception("Error saving active guitar setup")
+            failed.append(f"working setup ({e})")
         if self.guitar.profile:  # a user profile saves itself (Factory lives only in the working setup)
             try:
                 ProfileManager.save_profile(self.guitar.profile, self.guitar)
-            except Exception:
+            except Exception as e:
                 log.exception("Error saving profile %r", self.guitar.profile)
+                failed.append(f"profile “{self.guitar.profile}” ({e})")
+        if failed:
+            self.statusBar().showMessage("⚠ Could not save " + "; ".join(failed) + ". Your edits are not on disk.", 15000)
+        return not failed
 
     def closeEvent(self, event):
         # Factory edits survive a restart only when the last session is resumed.

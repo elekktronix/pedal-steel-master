@@ -439,6 +439,39 @@ class CircleOfFifthsWidget(QWidget):
         self._voicing_cache.clear()
         self._refresh_family_buttons()
 
+    def pick_voicing(self, root: str, c_type: str, bar_fret: int, levers, pocket: Set[int],
+                     allowed: Optional[Set[str]] = None):
+        """(match, movement) for one chord from the current stance, or None: the voicing the button's
+        cue shows. Both the cue and MainWindow's click handler use this, so a click always lands on
+        the stance the cue promised (A7). Voicings are cached per neck and fret window (D-31)."""
+        cache_key = (id(self.neck), root, c_type, min(22, bar_fret + 9))
+        matches = self._voicing_cache.get(cache_key)
+        if matches is None:
+            matches = VoicingSolver.find_all_voicings(
+                neck=self.neck,
+                root_name=root,
+                chord_type=c_type,
+                max_fret=min(22, bar_fret + 9),
+                filter_awkward=True,
+                omitted_intervals={"5"} if "7" in c_type else None,
+            )
+            self._voicing_cache[cache_key] = matches
+
+        pocket_list = sorted(pocket)
+        pocket_matches = [m for m in matches if m.grip_strings == pocket_list]
+        pool = pocket_matches if (self.cb_lock_pocket.isChecked() and pocket_matches) else matches
+        current = sorted(levers)
+        valid = []
+        for m in pool:
+            mech = VoicingSolver.classify_movement(bar_fret, current, m.fret, m.engaged_levers,
+                                                   neck=self.neck)  # B9: roles, not P1/P2
+            if not allowed or mech in allowed:
+                valid.append((m, mech))
+        if not valid:
+            return None
+        valid.sort(key=lambda item: (abs(item[0].fret - bar_fret), len(item[0].engaged_levers)))
+        return valid[0]
+
     def update_current_stance(self, bar_fret: int, levers: Set[str], pocket: Set[int]):
         """Live updates pathway cues underneath each button without altering button dimensions."""
         self.current_bar_fret = bar_fret
@@ -446,39 +479,13 @@ class CircleOfFifthsWidget(QWidget):
         self.active_pocket = set(pocket)
 
         allowed = self.get_allowed_mechanics()
-        pocket_list = sorted(list(pocket))
 
         for data in self.family_buttons_data:
             lbl_cue = data["cue_label"]
-            root = data["root"]
-            c_type = data["chord_type"]
-
-            # Voicings depend on the neck and fret window only, not on the levers: cache them (D-31).
-            cache_key = (id(self.neck), root, c_type, min(22, bar_fret + 9))
-            matches = self._voicing_cache.get(cache_key)
-            if matches is None:
-                matches = VoicingSolver.find_all_voicings(
-                    neck=self.neck,
-                    root_name=root,
-                    chord_type=c_type,
-                    max_fret=min(22, bar_fret + 9),
-                    filter_awkward=True,
-                    omitted_intervals={"5"} if "7" in c_type else None,
-                )
-                self._voicing_cache[cache_key] = matches
-
-            pocket_matches = [m for m in matches if m.grip_strings == pocket_list]
-            pool = pocket_matches if (self.cb_lock_pocket.isChecked() and pocket_matches) else matches
-
-            valid_pool = []
-            for m in pool:
-                mech = VoicingSolver.classify_movement(bar_fret, self.current_levers, m.fret, m.engaged_levers)
-                if not allowed or mech in allowed:
-                    valid_pool.append((m, mech))
-
-            if valid_pool:
-                valid_pool.sort(key=lambda item: (abs(item[0].fret - bar_fret), len(item[0].engaged_levers)))
-                best_m, _ = valid_pool[0]
+            picked = self.pick_voicing(data["root"], data["chord_type"], bar_fret, self.current_levers,
+                                       self.active_pocket, allowed)
+            if picked:
+                best_m, _ = picked
                 delta = best_m.fret - bar_fret
                 delta_str = f"+{delta}" if delta > 0 else f"{delta}" if delta < 0 else "Δ0"
                 lev_abbr = "+".join(best_m.engaged_levers) if best_m.engaged_levers else "Open"

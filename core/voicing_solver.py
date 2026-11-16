@@ -8,7 +8,7 @@ from typing import Dict, List, Optional, Set, Tuple
 from core.ergonomics import ErgonomicsEngine, ErgonomicStance, StanceDifficulty
 from core.models import Neck
 from core.resolver import FretboardResolver
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE
+from core.theory import CHORD_FORMULAS, NOTE_TO_SEMITONE, spell_pc  # spelling follows the preference (B19)
 
 
 @dataclass
@@ -45,6 +45,9 @@ class VoicingSolver:
         [10, 8, 6], [8, 6, 5], [8, 6, 4], [6, 5, 4],
         [5, 4, 3], [4, 3, 1], [10, 8, 6, 5], [8, 6, 5, 4],
         [6, 5, 4, 3], [5, 4, 3, 2], [8, 6, 5, 4, 3],
+        # Chromatic strings 9 (D, the open b7) and 7 (F#, the 9th) (B11): open 9-8-6-5 and
+        # 9-6-5-4 are E7, 9-6-5 is a rootless E7; with A+B, 7-6-5 is F#m and 8-7-6-5 is F#m7.
+        [9, 8, 6, 5], [9, 6, 5], [9, 6, 5, 4], [7, 6, 5], [8, 7, 6, 5],
     ]
 
     STANDARD_C6_GRIPS = [
@@ -120,9 +123,39 @@ class VoicingSolver:
         return stances
 
     @classmethod
-    def candidate_stances(cls, neck: Neck) -> List[Set[str]]:
-        """Public alias of the ergonomic stance list (used by core.copedant_compare, E-25)."""
-        return cls._generate_candidate_stances(neck)
+    def candidate_stances(cls, neck: Neck, include_half_stops: bool = False) -> List[Set[str]]:
+        """The ergonomic stance list (used by core.copedant_compare, E-25). With include_half_stops,
+        each stance also gets a `<ID>_HALF` variant per controller that has an active half-stop
+        rule (Critical Rule 7, B13), as the Chord Atlas and Compare already do."""
+        stances = cls._generate_candidate_stances(neck)
+        if not include_half_stops:
+            return stances
+        half_ids = {h.controller_id for h in neck.half_stops if h.is_active}
+        out: List[Set[str]] = []
+        seen = set()
+        for st in stances:
+            variants = [set(st)] + [(set(st) - {cid}) | {f"{cid}_HALF"} for cid in sorted(st & half_ids)]
+            for v in variants:
+                key = frozenset(v)
+                if key not in seen:
+                    seen.add(key)
+                    out.append(v)
+        return out
+
+    @staticmethod
+    def _a_b_ids(neck: Optional[Neck]) -> Set[str]:
+        """Controller IDs of the A and B pedals (roles), or {"P1", "P2"} when no neck is given."""
+        if neck is None:
+            return {"P1", "P2"}
+        from core.stances import detect_roles
+
+        roles = detect_roles(neck)
+        return {roles[r] for r in ("A", "B") if r in roles}
+
+    @classmethod
+    def _holds_a_and_b(cls, neck: Optional[Neck], controllers: Set[str]) -> bool:
+        ab = cls._a_b_ids(neck)
+        return len(ab) == 2 and ab <= set(controllers)
 
     @classmethod
     def classify_movement(
@@ -131,15 +164,17 @@ class VoicingSolver:
         origin_levers: List[str],
         target_fret: int,
         target_levers: List[str],
+        neck: Optional[Neck] = None,
     ) -> str:
-        """Classifies the mechanical transition between two pedal steel stances."""
+        """Classifies the mechanical transition between two pedal steel stances. "A+B, slide 2" is
+        recognised by functional role (Critical Rule 8a, B9); without a neck the E9 IDs are assumed."""
         delta = target_fret - origin_fret
         orig_set = set(origin_levers or [])
         target_set = set(target_levers or [])
 
         if delta == 0:
             return "Same-Fret Pedal Drop"
-        elif (delta == 2 and "P1" in target_set and "P2" in target_set) or (
+        elif (delta == 2 and cls._holds_a_and_b(neck, target_set)) or (
             delta != 0 and target_set == orig_set and len(target_set) > 0
         ):
             return "Hold Pedals & Slide"
@@ -159,6 +194,7 @@ class VoicingSolver:
         omitted_intervals: Optional[Set[str]] = None,
         max_controllers: Optional[int] = None,
         allowed_controllers_only: Optional[Set[str]] = None,
+        include_half_stops: bool = False,
     ) -> List[VoicingMatch]:
         if root_name not in NOTE_TO_SEMITONE or chord_type not in CHORD_FORMULAS:
             return []
@@ -170,7 +206,7 @@ class VoicingSolver:
         if not target_intervals:
             return []
 
-        candidate_stances = cls._generate_candidate_stances(neck)
+        candidate_stances = cls.candidate_stances(neck, include_half_stops=include_half_stops)
         candidate_grips = cls.get_candidate_grips(neck)
 
         matches: List[VoicingMatch] = []
@@ -181,10 +217,11 @@ class VoicingSolver:
                 if max_controllers is not None and len(levers) > max_controllers:
                     continue
 
-                if allowed_controllers_only is not None and not levers.issubset(allowed_controllers_only):
+                bases = {c.replace("_HALF", "") for c in levers}
+                if allowed_controllers_only is not None and not bases.issubset(allowed_controllers_only):
                     continue
 
-                ergo = ErgonomicsEngine.evaluate_stance(levers)
+                ergo = ErgonomicsEngine.evaluate_stance(bases)
                 if not ergo.is_possible:
                     continue
                 if filter_awkward and ergo.difficulty == StanceDifficulty.AWKWARD:
@@ -317,9 +354,9 @@ class VoicingSolver:
                     delta_str = f"+{delta}" if delta > 0 else f"{delta}"
                     movement = "Hold Pedals & Slide"
                     action = f"Slide {delta_str} frets to F{m.fret} | HOLD {', '.join(m.engaged_levers)}"
-                elif delta == 2 and "P1" in m.engaged_levers and "P2" in m.engaged_levers:
+                elif delta == 2 and cls._holds_a_and_b(neck, set(m.engaged_levers)):
                     movement = "Hold Pedals & Slide"
-                    action = f"Slide +2 to F{m.fret} | Keep P1+P2 down"
+                    action = f"Slide +2 to F{m.fret} | Keep {'+'.join(sorted(cls._a_b_ids(neck)))} down"
                 elif delta != 0 and len(m_levers_set) == 0:
                     delta_str = f"+{delta}" if delta > 0 else f"{delta}"
                     movement = "Open Bar Shift"
@@ -370,32 +407,32 @@ class VoicingSolver:
 
         # 1. Major 7th: Minor triad off the 3rd (e.g. Cmaj7 -> Em over C)
         if chord_type in ("Major 7th", "Maj7", "maj7"):
-            third_note = NOTE_NAMES_SHARP[(root_pc + 4) % 12]
+            third_note = spell_pc((root_pc + 4) % 12)
             return (f"{third_note}m", "Minor triad on 3rd", f"Play {third_note}m triad over {root_name} bass to suggest {root_name}maj7")
 
         # 2. Dominant 9th: Minor triad off the 5th (e.g. G9 -> Dm over G)
         if chord_type in ("Dominant 9th", "Dom 9", "9"):
-            fifth_note = NOTE_NAMES_SHARP[(root_pc + 7) % 12]
+            fifth_note = spell_pc((root_pc + 7) % 12)
             return (f"{fifth_note}m", "Minor triad on 5th", f"Play {fifth_note}m triad (5-b7-9) over {root_name} bass for {root_name}9")
 
         # 3. Dominant 11th: Major triad off the b7th (e.g. G11 -> F over G)
         if chord_type in ("Dominant 11th", "Dom 11", "11"):
-            b7_note = NOTE_NAMES_SHARP[(root_pc + 10) % 12]
+            b7_note = spell_pc((root_pc + 10) % 12)
             return (f"{b7_note}", "Major triad on b7th", f"Play {b7_note} triad (b7-9-11) over {root_name} bass for {root_name}11")
 
         # 4. Dominant 13th: Minor triad off the 9th (e.g. G13 -> Am over G)
         if chord_type in ("Dominant 13th", "Dom 13", "13"):
-            ninth_note = NOTE_NAMES_SHARP[(root_pc + 2) % 12]
+            ninth_note = spell_pc((root_pc + 2) % 12)
             return (f"{ninth_note}m", "Minor triad on 9th", f"Play {ninth_note}m triad (9-11-13) over {root_name} bass for {root_name}13")
 
         # 5. Altered Dominant 7(b9#5): Minor triad off the b9th
         if "alt" in chord_type.lower() or "b9#5" in chord_type:
-            b9_note = NOTE_NAMES_SHARP[(root_pc + 1) % 12]
+            b9_note = spell_pc((root_pc + 1) % 12)
             return (f"{b9_note}m", "Minor triad on b9th", f"Play {b9_note}m triad (b9-3-#5) over {root_name} bass for {root_name}7alt")
 
         # 6. Minor 7th: Major triad off the b3rd (e.g. Dm7 -> F over D)
         if chord_type in ("Minor 7th", "m7", "min7"):
-            b3_note = NOTE_NAMES_SHARP[(root_pc + 3) % 12]
+            b3_note = spell_pc((root_pc + 3) % 12)
             return (f"{b3_note}", "Major triad on b3rd", f"Play {b3_note} triad over {root_name} bass to suggest {root_name}m7")
 
         return None

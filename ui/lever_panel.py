@@ -23,6 +23,8 @@ class HalfStopLeverButton(QPushButton):
     - 0: Disengaged (Neutral Slate)
     - 1: Half-Stop (Amber Glow #d39e00) - Single Click
     - 2: Full-Stop (Emerald #20c997 or Blue #0d6efd) - Double Click
+    Controllers without an active half-stop rule toggle full on/off at once, with no
+    single/double-click timer (B14).
     """
 
     state_changed = Signal(str, int)  # (controller_id, state: 0, 1, or 2)
@@ -32,7 +34,8 @@ class HalfStopLeverButton(QPushButton):
         self.controller_id = controller_id
         self.is_pedal = is_pedal
         self.state: int = 0  # 0=off, 1=half, 2=full
-        self.has_half_stop: bool = False  # Derived strictly from active profile half_stops
+        self._has_half_stop: bool = False  # Derived strictly from active profile half_stops
+        self.has_half_stop = False
 
         self.setCheckable(False)
         self.setFixedHeight(34)
@@ -43,9 +46,22 @@ class HalfStopLeverButton(QPushButton):
 
         self._update_appearance()
 
+    @property
+    def has_half_stop(self) -> bool:
+        return self._has_half_stop
+
+    @has_half_stop.setter
+    def has_half_stop(self, value: bool) -> None:
+        self._has_half_stop = bool(value)
+        self.setToolTip("Click: half-stop · double-click: full stop" if self._has_half_stop
+                        else "Click to engage / release")
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
-            if self._single_click_timer.isActive():
+            if not self.has_half_stop:  # no half-stop: act at once, no double-click wait (B14)
+                self._single_click_timer.stop()
+                self._set_state(0 if self.state else 2)
+            elif self._single_click_timer.isActive():
                 self._single_click_timer.stop()
                 new_state = 0 if self.state == 2 else 2
                 self._set_state(new_state)
@@ -130,6 +146,7 @@ class LeverTogglePanel(QWidget):
         self.pedal_buttons: Dict[str, HalfStopLeverButton] = {}
         self.lever_buttons: Dict[str, HalfStopLeverButton] = {}
         self.active_controllers: Set[str] = set()
+        self.dropped_half_stops: Set[str] = set()  # half tokens dropped by the last set_active_controllers (B3)
         self.neck: Optional[Neck] = None
 
         self._init_ui()
@@ -299,7 +316,7 @@ class LeverTogglePanel(QWidget):
         self.pedal_layout.addStretch()
 
         # Knee Levers
-        from ui.copedant_editor_dialog import STANDARDIZED_KNEE_LEVERS
+        from core.models import STANDARDIZED_KNEE_LEVERS
         physical_order = [lid for lid, _, _ in STANDARDIZED_KNEE_LEVERS]
         lever_keys = sorted(
             list(neck.knee_levers.keys()),
@@ -332,13 +349,20 @@ class LeverTogglePanel(QWidget):
     def set_active_controllers(self, controllers: Set[str]) -> Set[str]:
         """Sets button states, the panel's own state and the feasibility badge WITHOUT emitting
         levers_changed (D-03). Accepts "<ID>_HALF" tokens. Returns the tokens actually applied
-        (controllers that do not exist on this neck are dropped)."""
+        (controllers that do not exist on this neck are dropped). A half token for a controller
+        without an active half-stop rule is dropped too and recorded in `dropped_half_stops`, so a
+        removed rule never sounds a default +/-1 (Critical Rule 7, B3)."""
         buttons = {**self.pedal_buttons, **self.lever_buttons}
         applied: Set[str] = set()
+        self.dropped_half_stops = set()
         for token in controllers:
             base = token.replace("_HALF", "")
-            if base in buttons:
-                applied.add(f"{base}_HALF" if token.endswith("_HALF") else base)
+            if base not in buttons:
+                continue
+            if token.endswith("_HALF") and not buttons[base].has_half_stop:
+                self.dropped_half_stops.add(base)
+                continue
+            applied.add(f"{base}_HALF" if token.endswith("_HALF") else base)
         for cid, btn in buttons.items():
             state = 2 if cid in applied else (1 if f"{cid}_HALF" in applied else 0)
             btn.set_engagement_state(state)

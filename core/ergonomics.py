@@ -23,8 +23,14 @@ class ErgonomicStance:
 
 
 class ErgonomicsEngine:
-    LEFT_KNEE_LEVERS = {"LKL", "LKR", "LKV"}
-    RIGHT_KNEE_LEVERS = {"RKL", "RKR", "RKV"}
+    # Every knee lever ID belongs to one knee (A2). LKL2 is a second left-knee-left lever; legacy VL
+    # is the left-knee vertical (renamed LKV on load); RKR2 is BE E9's "RKRHS", the RKR half-travel
+    # modelled as its own lever, so it clashes with RKR and RKL.
+    LEFT_KNEE_LEVERS = {"LKL", "LKR", "LKV", "LKL2", "VL"}
+    RIGHT_KNEE_LEVERS = {"RKL", "RKR", "RKV", "RKR2"}
+    # Centre levers are pushed by whichever knee is free: only one at a time, and not while both
+    # side knees are already busy.
+    CENTER_KNEE_LEVERS = {"CKL", "CKV", "CKR"}
 
     @staticmethod
     def _parse_pedal_number(pid: str) -> Optional[int]:
@@ -83,6 +89,17 @@ class ErgonomicsEngine:
                 f"Right knee clash: Cannot push opposing levers ({', '.join(sorted(rk_active))}) simultaneously."
             )
 
+        # 4. Centre knee levers
+        ck_active = controllers & cls.CENTER_KNEE_LEVERS
+        if len(ck_active) > 1:
+            clash_reasons.append(
+                f"Centre knee clash: Cannot push more than one centre lever ({', '.join(sorted(ck_active))})."
+            )
+        elif ck_active and lk_active and rk_active:
+            clash_reasons.append(
+                f"Knee overload: {next(iter(ck_active))} needs a knee, but both knees are already engaged."
+            )
+
         # If any physical impossibility was detected:
         if clash_reasons:
             return ErgonomicStance(
@@ -100,6 +117,8 @@ class ErgonomicsEngine:
         if lk_active:
             contact_points += 1
         if rk_active:
+            contact_points += 1
+        if ck_active:
             contact_points += 1
 
         # Calculate penalty and ergonomics tier

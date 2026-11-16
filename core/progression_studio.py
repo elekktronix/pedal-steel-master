@@ -13,7 +13,7 @@ import re
 from dataclasses import dataclass, field, replace
 from typing import Dict, List, Optional, Tuple
 
-from core.models import Neck
+from core.models import HALF_SUFFIX, Neck, half_stop_controllers
 from core.permutation_engine import PermutationEngine
 from core.progression_presets import ProgressionPreset, resolve_preset_steps
 from core.resolver import FretboardResolver
@@ -340,6 +340,21 @@ def preset_progression(preset: ProgressionPreset, neck: Neck, bpb: int = 4) -> O
     return StudioProgression(name=preset.name, key=preset.key, steps=steps, neck_name=neck.name)
 
 
+def stance_is_playable(neck: Neck, step: StudioStep) -> bool:
+    """True if every controller and string of the step's stance exists on the neck, and every
+    half-stop token has an active rule (B1, B3). A step without a stance is trivially playable."""
+    if not step.has_stance:
+        return True
+    defined = set(neck.pedals) | set(neck.knee_levers)
+    halves = half_stop_controllers(neck)
+    for token in step.controllers:
+        half = token.endswith(HALF_SUFFIX)
+        base = token[:-len(HALF_SUFFIX)] if half else token
+        if base not in defined or (half and base not in halves):
+            return False
+    return max(step.grip) <= neck.string_count
+
+
 # ---- voice leading ---------------------------------------------------------------------------
 
 def fill_stances(neck: Neck, steps: List[StudioStep], constraints: VoiceLeadingConstraints,
@@ -363,7 +378,9 @@ def fill_stances(neck: Neck, steps: List[StudioStep], constraints: VoiceLeadingC
             ProgressionMeasure(measure_id=k, slots=[ChordSlot(beat=1, root=steps[i].root, chord_type=steps[i].chord_type)])
             for k, i in enumerate(segment)
         ])
-        result = VoiceLeadingEngine.solve_progression(neck, prog, replace(constraints, start_fret=last_fret))
+        # Half-stop stances are candidates too (B13), so a re-voiced step can keep a half-stop.
+        result = VoiceLeadingEngine.solve_progression(
+            neck, prog, replace(constraints, start_fret=last_fret, include_half_stops=True))
         for i, v in zip(segment, result):
             if v is None:
                 steps[i].clear_stance()
@@ -432,6 +449,13 @@ def arpeggio_strings(step: StudioStep, beats: Optional[int] = None) -> List[int]
     return [e.string_number for e in events]
 
 
+def _tab_controller_name(token: str, names: Dict[str, str]) -> str:
+    """Display name for tab output; a half-stop token reads 'P3½', not 'P3_HALF' (B16)."""
+    half = token.endswith(HALF_SUFFIX)
+    base = token[:-len(HALF_SUFFIX)] if half else token
+    return names.get(base, base) + ("½" if half else "")
+
+
 def tab_steps(steps: List[StudioStep], names: Dict[str, str]) -> List[TabStep]:
     """Voiced steps as TabSteps (controllers shown by display name). Arpeggios expand to one column per
     note of a single permutation cycle, with the pick finger."""
@@ -439,7 +463,7 @@ def tab_steps(steps: List[StudioStep], names: Dict[str, str]) -> List[TabStep]:
     for s in steps:
         if not s.has_stance:
             continue
-        ctrl_names = [names.get(c, c) for c in s.controllers]
+        ctrl_names = [_tab_controller_name(c, names) for c in s.controllers]
         if s.style == STYLE_ARPEGGIO:
             for k, ev in enumerate(PermutationEngine.generate_sequence(s.perm_id, list(s.grip), cycles=1)):
                 out.append(TabStep(fret=s.fret, engaged_levers=list(ctrl_names), grip_strings={ev.string_number},
