@@ -1,4 +1,4 @@
-"""Low-latency native MIDI audio engine for pedal steel with natural acoustic sustain (Patch 25),
+"""Low-latency native MIDI audio engine for pedal steel with natural acoustic decay (Patch 25, one held note per string),
 channel-per-string independent mechanical pitch glides, and Jeff Newman compensated temperament.
 
 All MIDI output runs on one scheduler thread fed by a timed queue (E-11).
@@ -246,7 +246,10 @@ class MidiAudioEngine:
     def _init_channels(self) -> None:
         for ch in ALL_CHANNELS:
             self._send(0x000019C0 | ch)  # GM Patch 25: Steel String Acoustic Guitar
-            self._send(0x007F40B0 | ch)  # CC 64 (Sustain Pedal ON)
+            # Sustain pedal OFF (D-50). A string's note rings until that string is struck again
+            # (_strike sends its note-off). With CC64 held, note-offs were ignored, every strike kept
+            # its voice, and the GS synth stole voices from the higher channels (strings 6-10).
+            self._send(0x000040B0 | ch)
             self._set_bend_range(ch, int(BEND_RANGE_SEMITONES))
             self._bend(ch, 0)
         self._channels_ready = True
@@ -289,7 +292,7 @@ class MidiAudioEngine:
                 self._glide_gen[ch] = self._glide_gen.get(ch, 0) + 1
                 self._send(0x000078B0 | ch)  # All Sound Off
                 self._send(0x00007BB0 | ch)  # All Notes Off
-                self._send(0x007F40B0 | ch)  # Sustain On
+                self._send(0x000040B0 | ch)  # Sustain off (D-50)
                 self._bend(ch, 0)
             self._active_pitches.clear()
 
