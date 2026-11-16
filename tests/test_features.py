@@ -86,6 +86,24 @@ class AudioSchedulerTests(unittest.TestCase):  # E-11 / D-35
         last_on = max(i for i, e in enumerate(events) if e[0] == "on")
         self.assertFalse([e for e in events[last_on + 1:] if e[0] == "bend"])
 
+    def test_sustain_pedal_never_held_and_restrike_releases(self):  # D-53
+        msgs = []
+        engine = MidiAudioEngine(send=msgs.append)
+        try:
+            engine.play_pocket({6: 56, 8: 52, 10: 47})
+            engine.play_pocket({6: 56, 8: 52, 10: 47})
+            engine.wait_idle()  # silence_all drops queued strikes (B2)
+            engine.silence_all()
+            engine.wait_idle()
+        finally:
+            engine.close()
+        sustain = [(m >> 16) & 0x7F for m in msgs if m & 0xF0 == 0xB0 and (m >> 8) & 0x7F == 64]
+        self.assertTrue(sustain)
+        self.assertEqual(set(sustain), {0})  # CC64 held = note-offs ignored = voices stolen
+        offs = [(ch, n) for kind, ch, n, _ in _decode(msgs) if kind == "off"]
+        for s in (6, 8, 10):
+            self.assertIn(channel_for_string(s), [ch for ch, _ in offs])
+
     def test_click_uses_percussion_channel(self):  # permutation trainer metronome
         from core.audio import CLICK_SOUNDS, PERCUSSION_CHANNEL
 
