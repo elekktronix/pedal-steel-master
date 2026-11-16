@@ -63,26 +63,27 @@ Each engine is a class of `@classmethod`s with no instance state. **Copedant-awa
 
 ## chord_identifier.py
 
-It tries all 12 roots. A root qualifies only if its pitch class is present. Exact pitch-class-set matches are scored: 4-note chords 10, triads 8, shell 7ths 6, dyads 4, plus 2 if the root is in the bass. **No match means `None`** (extensions and rootless voicings aren't recognized; see E-08). Families: `Major 7th`, `Minor 7th`, `Dominant 7th`, `Major 6`, `Minor 6`, `Half-Diminished`, `Diminished 7th`, `Major`, `Minor`, `Diminished`, `Augmented`, `Sus4`, `Dyad`.
+It tries all 12 roots. A root qualifies only if its pitch class is present. Exact pitch-class-set matches are scored: 4-note chords 10, triads 8, shell 7ths 6, dyads 4, plus 2 if the root is in the bass. **Ties are broken by the bass note's role** (root, then third, then fifth, B10), so `C-E-G-A` over E or G reads `C6` and `F-A-C-D` over A reads `F6`, the same in every key (before, the lowest root pitch class won and the label flipped with the key). If the table finds nothing, a generic fallback matches 4+ pitch classes against `CHORD_FORMULAS` (exact sets, then sets missing only the 5th; roots bass first), so `G9` and `C6/9` are recognised. Otherwise `None` (rootless voicings and 7ths without a 3rd aren't recognised). Families are `CHORD_FORMULAS` keys (`Major 6th`, `Minor 6th`, …, B10), except the dyad marker `Dyad`, which callers use to reject dyads.
 
 ## voicing_solver.py
 
-`find_all_voicings(neck, root, chord_type, max_fret=15, filter_awkward, omitted_intervals, max_controllers, allowed_controllers_only)`:
-1. Candidate stances: open, every single pedal, every feasible pedal pair, every single knee, every feasible knee pair, and every feasible combination of those (filtered by `ErgonomicsEngine`).
-2. Grip candidates come from `STANDARD_E9_GRIPS`, `STANDARD_C6_GRIPS` or `STANDARD_U12_GRIPS`, chosen by `string_count ≥ 12`, then C6, else E9.
+`find_all_voicings(neck, root, chord_type, max_fret=15, filter_awkward, omitted_intervals, max_controllers, allowed_controllers_only, include_half_stops=False)`:
+1. Candidate stances (`candidate_stances(neck, include_half_stops)`): open, every single pedal, every feasible pedal pair, every single knee, every feasible knee pair, and every feasible combination of those (filtered by `ErgonomicsEngine`). With `include_half_stops`, each stance also gets a `<ID>_HALF` variant per controller with an active half-stop rule (B13), as Compare and the Atlas do; ergonomics and `allowed_controllers_only` use the base IDs.
+2. Grip candidates come from `STANDARD_E9_GRIPS`, `STANDARD_C6_GRIPS` or `STANDARD_U12_GRIPS`, chosen by `string_count ≥ 12`, then C6, else E9. The E9 list includes the chromatic-string grips `9-8-6-5`, `9-6-5`, `9-6-5-4`, `7-6-5` and `8-7-6-5` (B11; checked with `grip_matches_chord` in `tests/test_audit_b.py`).
 3. For each fret and stance, resolve the neck once. For each grip, keep it if every string is a non-omitted chord tone, there are enough unique intervals, and a third-like tone is present when the target has one.
 4. Score = 14·unique + 5·has R + 6·has 3rd + 3·(no doubled tones) − ergonomic penalty.
 
 Other functions:
 - `find_circle_neighbors` (the Chord Atlas radar) locates the key **by pitch class** (so C#, D#, G#, A# and Gb work), then searches IV, V, V7, vi and ii.
-- `get_triad_substitution`: Franklin triad-over-root table.
+- `get_triad_substitution`: Franklin triad-over-root table (spelled with `spell_pc`, B19).
+- `classify_movement(origin_fret, origin_levers, target_fret, target_levers, neck=None)`: "Hold Pedals & Slide" for A+B and a 2-fret slide is detected by **role** (`detect_roles`), so it works on a Franklin-shifted neck (B9). Without a neck, `P1`/`P2` are assumed. `find_circle_neighbors` uses the same check.
 - Unused helpers still present: `get_c6_open_chords` and `get_newman_minor_anchors` (the latter duplicates star-map logic).
 
 ## voice_leader.py
 
 - `.cp` JSON (`tonalCenter`, `tempo`, `measures[].slots[].chord{root,type}`). **Only the first chord per measure** is used (`primary_chord`).
 - `normalize_chord_type` maps many aliases (`m7b5`, `ø`, `m6`, `dim7`, `aug`, `+`, `sus4`, `9`, `6`, `69`, …) and **raises `UnknownChordTypeError`** for anything it doesn't know. Loading an unknown type shows an error dialog instead of silently turning the chord into Major.
-- `solve_progression` is a Viterbi DP over the voicing candidates of the *solvable* chord measures. The cost terms are:
+- `solve_progression(neck, prog, constraints, rng=None)` is a Viterbi DP over the voicing candidates of the *solvable* chord measures. Candidates are searched **once per distinct chord** (`_candidates_for`, cached by root and type, B5); a 12-bar blues with 3 chords does 3 searches, not 12. `constraints.include_half_stops` passes through to `find_all_voicings`. The `"random"` trajectory draws from `rng` (a `random.Random`), so tests can seed it (B12). The cost terms are:
   - start distance × 2000;
   - jump over `max_fret_jump`: 50000 per fret, else jump × 2;
   - trajectory penalties;
@@ -98,7 +99,9 @@ The Progression Studio's model, Qt-free. A `StudioProgression` (name, key, time 
 - **Stale stances are impossible (D-45):** `set_chord` with a different chord clears the stance and the pin. Loading a progression made on another neck clears its stances.
 - **Typed chords:** `parse_chord_symbol` ("Am7", "F#m7b5", "Bbmaj7", "C6/9", "G/B" with the bass ignored) and `parse_progression_text`: without `|` each chord is a bar; with `|` the chords of a bar share it (first chords get the extra beats); `:n` sets beats, `%` repeats, `-`/`N.C.` rests. `format_progression_text` is the inverse.
 - **Generated:** `CADENCES` (ii–V–I, iiø–V–i, iii–vi–ii–V, I–vi–IV–V, I–IV–I–V, 12-bar blues) via `cadence_progression(kind, key)`; `dice_progression` (two rolled degrees, each approached by its own V7); `preset_progression` maps a practice preset onto the neck with its stances **pinned**.
-- **Voice leading:** `fill_stances(neck, steps, constraints, only_missing)` runs `VoiceLeadingEngine` on each run of free chord steps between anchors (pinned stances; with `only_missing`, every voiced step), starting near the anchor before it. Returns the unsolvable indices.
+- **Voice leading:** `fill_stances(neck, steps, constraints, only_missing)` runs `VoiceLeadingEngine` on each run of free chord steps between anchors (pinned stances; with `only_missing`, every voiced step), starting near the anchor before it. Half-stop stances are candidates (`include_half_stops=True`, B13). Returns the unsolvable indices.
+- **`stance_is_playable(neck, step)`** (B1, B3): every controller of the stance exists, every `_HALF` token has an active rule, and every grip string exists. The widget keeps pinned stances that pass it when the same tuning changes its controllers, and clears stale ones on load.
+- **Tab:** `tab_steps` shows half tokens as `P3½` (B16), never the raw `P3_HALF`.
 - **Captured grips:** `identify_grip_chord(neck, fret, controllers, grip, hint)` resolves the grip; the hint (harmonic target) wins when the grip fits it, else bass-first roots, exact matches before ones missing only the 5th.
 - **Files:** `to_dict` writes the voice leader's `.cp` format (chord per beat slot; a chord held into a bar is repeated on beat 1) plus a `studio` block with the exact steps; `from_dict` prefers that block, else reads the slots (each chord lasts to the next slot or the bar end; empty bars are rests).
 - **Playback:** `PlaybackPlan.build(prog, first, last, count_in_bars, loop).at(k)` says, for beat k after Play, whether it is a count-in beat, accented (bar start), which step starts, or done. `arpeggio_strings` gives the permutation order (one cycle per beat); `tab_steps` turns voiced steps into `TabStep`s (arpeggios as one column per note with the pick finger).
@@ -121,7 +124,7 @@ Pure pitch-class theory, no fretboard. `chords_in_scale` returns every triad (Ma
 
 ## relative_moves.py
 
-- `get_all_same_fret_chords(neck, fret, filter_mode)`: a fixed **role** stance list (E9 or C6) times fixed grips, through the resolver and `ChordIdentifier`. It rejects dyads and stances whose controllers don't touch the grip. The tonic is E (or C for C6) + fret. Options get a Roman numeral, a category, `chord_root` and `chord_type`. Canonical-stance bonuses: IV=A+B, V7=B+D, I=open, vi=A, ii=B+C, iii=D.
+- `get_all_same_fret_chords(neck, fret, filter_mode)`: a fixed **role** stance list (E9 or C6) times fixed grips, through the resolver and `ChordIdentifier`. It rejects dyads and stances whose controllers don't touch the grip. The tonic is E (or C for C6) + fret. Chords are read with `ChordIdentifier.identify_chord` (root and family as data, never the display tag, A1); `_roman_for` derives the numeral, pill and category from the chord type (aug `+`, m6 `6`, m7b5 `ø7`, dim `°`) and `_chord_name` builds the name from the formula suffix. Options get a Roman numeral, a category, `chord_root` and `chord_type`. Canonical-stance bonuses: IV=A+B, V7=B+D, I=open, vi=A, ii=B+C, iii=D.
 - `filter_mode="franklin"` → `get_same_fret_diatonic_hub(fret, neck)`: a static table with I, ii=B+C, iii=**D lever**, IV=A+B, vi=A, #I°=F and I6/9=C, where **each entry is verified** on the neck and dropped if it doesn't sound its chord.
 - `get_e9_relative_movements(fret, levers, neck)` (Warnock) and `get_c6_relative_movements(fret, neck)` (Barndo) are role-based formulas, verified per neck. Each option carries `chord_root` and `chord_type`, and **UI code must use those fields instead of parsing `chord_name`**.
 

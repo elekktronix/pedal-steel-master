@@ -5,12 +5,12 @@ interactive Mechanical Splits (with Control 1 & Control 2 dropdowns), and dedica
 
 import logging
 from copy import deepcopy
-from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtGui import QColor, QFont
 from PySide6.QtWidgets import (
+    QApplication,
     QCheckBox,
     QComboBox,
     QDialog,
@@ -44,6 +44,7 @@ from core.models import (
     HalfStopRule,
     Neck,
     NeckType,
+    STANDARDIZED_KNEE_LEVERS,  # moved to core (B19); re-exported here for old imports
     SplitRule,
     SteelGuitar,
     StringPitch,
@@ -51,24 +52,13 @@ from core.models import (
     detect_potential_splits,
     migrate_half_stop_tokens,
     migrate_legacy_ids,
-    shift_pedal_ids,
+    set_franklin_p1,
 )
 from core.profile_manager import ProfileManager, unique_neck_name
 from core.theory import NOTE_NAMES_SHARP, midi_to_note_name, note_to_midi
 
 log = logging.getLogger(__name__)
 
-STANDARDIZED_KNEE_LEVERS: List[Tuple[str, str, str]] = [
-    ("LKL", "Left Knee Left", "Left Knee"),
-    ("LKV", "Left Knee Vertical", "Left Knee"),
-    ("LKR", "Left Knee Right", "Left Knee"),
-    ("LKL2", "Left Knee Left 2", "Left Knee"),
-    ("CKL", "Center Knee Left", "Center Knee"),
-    ("CKV", "Center Knee Vertical", "Center Knee"),
-    ("CKR", "Center Knee Right", "Center Knee"),
-    ("RKL", "Right Knee Left", "Right Knee"),
-    ("RKR", "Right Knee Right", "Right Knee"),
-]
 
 
 class CopedantEditorDialog(QDialog):
@@ -174,6 +164,8 @@ class CopedantEditorDialog(QDialog):
         self.tab_half_stops = QWidget()
         self._init_half_stops_tab()
         self.tabs.addTab(self.tab_half_stops, "4. Half-Stops")
+        self._rule_tables_loaded = False
+        self.tabs.currentChanged.connect(self._on_tab_changed)
 
         root.addWidget(self.tabs, stretch=1)
 
@@ -461,15 +453,19 @@ class CopedantEditorDialog(QDialog):
         self._insert_split_row(sp)
 
     def _remove_split_rule(self):
-        row = self.splits_table.currentRow()
+        row = self._selected_rule_row(self.splits_table)
         if row >= 0:
             self.splits_table.removeRow(row)
 
     def _auto_detect_splits(self):
-        detected = detect_potential_splits(self.neck)
-        for s in detected:
-            self._insert_split_row(s)
-        QMessageBox.information(self, "Splits Detected", f"Auto-detected and populated {len(detected)} changer split points.")
+        # The model must match the table first; detection returns existing rules too, so only the
+        # new ones are added (no duplicate rows on a second click, A3/B7).
+        self._save_splits_from_ui()
+        existing = list(self.neck.splits)
+        new = [s for s in detect_potential_splits(self.neck) if not any(s is e for e in existing)]
+        self.neck.splits = existing + new
+        self._refresh_splits_tab()
+        QMessageBox.information(self, "Splits Detected", f"Auto-detected {len(new)} new changer split point(s).")
 
     def _save_splits_from_ui(self):
         updated_splits: List[SplitRule] = []
@@ -634,15 +630,16 @@ class CopedantEditorDialog(QDialog):
         self._insert_half_stop_row(rule)
 
     def _remove_half_stop_rule(self):
-        row = self.half_stops_table.currentRow()
+        row = self._selected_rule_row(self.half_stops_table)
         if row >= 0:
             self.half_stops_table.removeRow(row)
 
     def _auto_detect_half_stops(self):
+        self._save_half_stops_from_ui()  # detection skips rules in the model: sync it first (B7)
         detected = detect_potential_half_stops(self.neck)
-        for r in detected:
-            self._insert_half_stop_row(r)
-        QMessageBox.information(self, "Detection Complete", f"Identified and populated {len(detected)} potential half-stop controllers.")
+        self.neck.half_stops = list(self.neck.half_stops) + list(detected)
+        self._refresh_half_stops_tab()
+        QMessageBox.information(self, "Detection Complete", f"Added {len(detected)} new potential half-stop rule(s).")
 
     def _save_half_stops_from_ui(self):
         rules: List[HalfStopRule] = []
@@ -700,6 +697,30 @@ class CopedantEditorDialog(QDialog):
         self._rebuild_matrix_table()
         self._refresh_splits_tab()
         self._refresh_half_stops_tab()
+        self._rule_tables_loaded = True
+
+    def _on_tab_changed(self, _index: int):
+        """Flushes both rule tables into the working neck and rebuilds them, so a half-stop added
+        in tab 4 can be picked in tab 3 (and edits in either survive the switch) (B7)."""
+        if not self._rule_tables_loaded:
+            return
+        self._save_splits_from_ui()
+        self._save_half_stops_from_ui()
+        self._refresh_splits_tab()
+        self._refresh_half_stops_tab()
+
+    @staticmethod
+    def _selected_rule_row(table: QTableWidget) -> int:
+        """The row to remove: the row whose cell widget has keyboard focus (clicking a combo or spin
+        box does not select its row), else the current row (B7)."""
+        focus = QApplication.focusWidget()
+        if focus is not None:
+            for r in range(table.rowCount()):
+                for c in range(table.columnCount()):
+                    w = table.cellWidget(r, c)
+                    if w is not None and (w is focus or w.isAncestorOf(focus)):
+                        return r
+        return table.currentRow()
 
     # -------------------------------------------------------------------------
     # Changer configuration
@@ -763,22 +784,7 @@ class CopedantEditorDialog(QDialog):
         # Flush table edits into the model so the remap sees them, then rebuild the tables.
         self._save_splits_from_ui()
         self._save_half_stops_from_ui()
-
-        if enabled:
-            shift_pedal_ids(self.neck, +1)
-            new_pedals: Dict[str, CopedantChange] = {
-                "P1": CopedantChange(id="P1", label="P1 (Franklin)", changes=dict(franklin_changes or {}))
-            }
-            new_pedals.update(self.neck.pedals)
-            self.neck.pedals = new_pedals
-        else:
-            del self.neck.pedals["P1"]
-            # Rules that referenced the removed Franklin pedal no longer have a controller.
-            self.neck.splits = [
-                s for s in self.neck.splits if not any(c.replace("_HALF", "") == "P1" for c in s.controllers)
-            ]
-            self.neck.half_stops = [h for h in self.neck.half_stops if h.controller_id != "P1"]
-            shift_pedal_ids(self.neck, -1)
+        set_franklin_p1(self.neck, enabled, franklin_changes)  # core operation (B6)
 
         self.cb_c6_offset.blockSignals(True)
         self.cb_c6_offset.setChecked(self._has_franklin_p1())
@@ -1269,11 +1275,7 @@ class CopedantEditorDialog(QDialog):
     def _persist_active_guitar(self):
         if self.guitar:
             try:
-                storage_dir = ProfileManager.ensure_storage_dir() or getattr(
-                    ProfileManager, "STORAGE_DIR", Path.home() / ".psg_visualizer" / "profiles"
-                )
-                active_path = storage_dir / "active_guitar_setup.json"
-                self.guitar.save_to_file(str(active_path))
+                self.guitar.save_to_file(str(ProfileManager.active_setup_path()))  # B19
             except Exception:
                 log.exception("Failed to persist active guitar setup")
 

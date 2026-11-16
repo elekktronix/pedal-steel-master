@@ -9,6 +9,7 @@ Timing: a single-shot PreciseTimer is re-armed against an absolute beat grid, so
 
 import copy
 import json
+import logging
 import random
 import time
 from typing import Dict, List, Optional
@@ -55,12 +56,15 @@ from core.progression_studio import (
     format_progression_text,
     parse_progression_text,
     preset_progression,
+    stance_is_playable,
     tab_steps,
 )
 from core.stances import controller_display_names, describe_controllers, grip_matches_chord, is_c6_neck
 from core.tab_generator import TabGenerator
 from core.theory import CHORD_FORMULAS, note_names, respell
 from core.voice_leader import VoiceLeadingConstraints
+
+log = logging.getLogger(__name__)
 
 CLICK_OFF = "Off"
 NO_CHORD = "(no chord)"
@@ -481,26 +485,32 @@ class ProgressionStudioWidget(QWidget):
 
     # ------------------------------------------------------------------ neck / session
     def set_neck(self, neck: Neck):
-        """Stances are neck-specific: on a different neck (or different controllers) they are cleared
-        and re-voiced, never replayed on the wrong copedant (D-45)."""
+        """Stances are neck-specific: on a different neck they are cleared and re-voiced, never
+        replayed on the wrong copedant (D-45). When the same tuning only changed its controllers
+        (an editor Apply), pinned stances that are still playable are kept (B1)."""
         self.neck = neck
         self.names = controller_display_names(neck)
         sig = self._signature(neck)
-        if sig == self._neck_sig:
+        same_neck = neck.name == self.progression.neck_name
+        if sig == self._neck_sig and all(stance_is_playable(neck, s) for s in self.steps):
             self._rebuild_cards()
             return
+        sig_changed = sig != self._neck_sig
         self._neck_sig = sig
         self.stop()
-        had = any(s.has_stance for s in self.steps)
+        cleared = 0
         for s in self.steps:
-            s.clear_stance()
+            keep = same_neck and stance_is_playable(neck, s) and (s.pinned or not sig_changed)
+            if s.has_stance and not keep:
+                s.clear_stance()
+                cleared += 1
         self.progression.neck_name = neck.name
         self.unsolved = set()
         if self.isVisible():
             self._fill_missing()
         self._rebuild_cards()
-        if had:
-            self._status(f"Neck changed to {neck.name}: stances were re-voiced for it.")
+        if cleared:
+            self._status(f"Neck changed to {neck.name}: {cleared} stance(s) were re-voiced for it.")
 
     def session_data(self) -> dict:
         return self.progression.to_dict()
@@ -509,6 +519,7 @@ class ProgressionStudioWidget(QWidget):
         try:
             prog = StudioProgression.from_dict(data)
         except Exception:
+            log.exception("Could not restore the Progression Studio session")  # B19
             return
         self.load_progression(prog, fill=False)
 
@@ -525,8 +536,9 @@ class ProgressionStudioWidget(QWidget):
     # ------------------------------------------------------------------ loading
     def load_progression(self, prog: StudioProgression, fill: bool = True, message: str = ""):
         self.stop()
-        if prog.neck_name and prog.neck_name != self.neck.name:
-            for s in prog.steps:
+        other_neck = bool(prog.neck_name) and prog.neck_name != self.neck.name
+        for s in prog.steps:
+            if other_neck or not stance_is_playable(self.neck, s):  # stale IDs / half tokens (B3)
                 s.clear_stance()
         prog.neck_name = self.neck.name
         self.progression = prog

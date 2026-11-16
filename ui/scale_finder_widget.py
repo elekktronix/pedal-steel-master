@@ -51,7 +51,7 @@ class ScaleFinderWidget(QWidget):
     box_highlight_requested = Signal(int, int)          # min_fret, max_fret
     clear_highlight_requested = Signal()                # clear box shading
     box_shading_toggled = Signal(bool) # Emits when the user toggles the preference
-    play_note_requested = Signal(int)                   # midi_note
+    play_note_requested = Signal(int, int, list)        # midi_note, string_number, engaged_levers (A10)
     target_changed = Signal(str, str)                   # root, scale_name
     # Scale map on the fretboard (E-30)
     overlay_changed = Signal(list, list)                # all BoxNotes in the range, ascending run
@@ -626,7 +626,7 @@ class ScaleFinderWidget(QWidget):
         if 0 <= idx < len(self.run):
             if self.isVisible():
                 self.overlay_step_changed.emit(idx)
-            self.play_note_requested.emit(self.run[idx].midi_note)
+            self._request_note(self.run[idx])
 
     def stop_play_run(self):
         was_playing = self.play_timer.isActive() or bool(self._play_indices)
@@ -883,14 +883,19 @@ class ScaleFinderWidget(QWidget):
             self.overlay_reveal_requested.emit([])
         if self.quiz_mode == self.QUIZ_EAR:
             self.lbl_quiz_prompt.setText("🎧 Listen, then click the note you heard (Replay to hear it again).")
-            self.play_note_requested.emit(self.quiz_target.midi_note)
+            self._request_note(self.quiz_target)
         else:
             name = self.quiz_target.note_name.rstrip("-0123456789")
             self.lbl_quiz_prompt.setText(f"Find any <b>{self.quiz_target.degree_label}</b> ({name}) in the range.")
 
+    def _request_note(self, note: BoxNote):
+        """Asks MainWindow to play a scale note on its own string, with that note's stance, so
+        Newman cents apply when they are enabled (A10)."""
+        self.play_note_requested.emit(note.midi_note, note.string_number, list(note.engaged_levers))
+
     def _replay_target(self):
         if self.quiz_target is not None:
-            self.play_note_requested.emit(self.quiz_target.midi_note)
+            self._request_note(self.quiz_target)
 
     def _skip_question(self):
         if self.quiz_target is not None and self.isVisible():
@@ -904,7 +909,7 @@ class ScaleFinderWidget(QWidget):
         """Called with the circle the player clicked while the quiz runs."""
         if self.quiz_mode == self.QUIZ_OFF or self.quiz_target is None or self._quiz_waiting:
             return
-        self.play_note_requested.emit(note.midi_note)
+        self._request_note(note)
         self.quiz_attempts += 1
         where = (
             f"string {note.string_number}, fret {note.fret}, "
@@ -958,7 +963,7 @@ class ScaleFinderWidget(QWidget):
         self._update_status()
         self.scale_step_applied.emit(n.fret, n.engaged_levers, n.string_number, banner)
         self.overlay_step_changed.emit(idx)
-        self.play_note_requested.emit(n.midi_note)
+        self._request_note(n)
 
     def next_step(self):
         if self.run:

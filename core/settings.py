@@ -9,6 +9,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+from core.storage import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 SETTINGS_DIR = Path.home() / ".psg_visualizer"
@@ -50,7 +52,6 @@ def load_settings() -> Dict[str, Any]:
 def save_settings(settings: Dict[str, Any]) -> None:
     try:
         SETTINGS_DIR.mkdir(parents=True, exist_ok=True)
-        with open(SETTINGS_FILE, "w", encoding="utf-8") as f:
-            json.dump({**DEFAULT_SETTINGS, **settings}, f, indent=2)
+        atomic_write_json(SETTINGS_FILE, {**DEFAULT_SETTINGS, **settings})  # B8
     except Exception:
         log.exception("Failed to save settings to %s", SETTINGS_FILE)

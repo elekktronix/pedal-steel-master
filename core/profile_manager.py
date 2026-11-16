@@ -13,7 +13,8 @@ from copy import deepcopy
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from core.models import Neck, SteelGuitar, migrate_half_stop_tokens
+from core.storage import atomic_write_json
+from core.models import Neck, SteelGuitar, migrate_half_stop_tokens, migrate_legacy_ids
 
 log = logging.getLogger(__name__)
 
@@ -21,6 +22,9 @@ ACTIVE_SETUP_FILENAME = "active_guitar_setup.json"
 COPEDANT_FILE_FILTER = "Copedant files (*.json *.cop);;All Files (*.*)"
 FACTORY_PROFILE = ""  # profile key of the built-in factory presets
 FACTORY_PROFILE_LABEL = "Factory"
+# Windows device names: `CON.json` opens the console, not a file (B8).
+WINDOWS_RESERVED_NAMES = {"CON", "PRN", "AUX", "NUL", *(f"COM{i}" for i in range(1, 10)),
+                          *(f"LPT{i}" for i in range(1, 10))}
 
 
 def factory_guitar() -> SteelGuitar:
@@ -29,7 +33,7 @@ def factory_guitar() -> SteelGuitar:
 
     guitar = build_standard_d10_guitar()
     guitar.profile = FACTORY_PROFILE
-    return guitar
+    return prepare_loaded_guitar(guitar)
 
 
 def profile_label(profile: str) -> str:
@@ -37,9 +41,11 @@ def profile_label(profile: str) -> str:
 
 
 def prepare_loaded_guitar(guitar: SteelGuitar) -> SteelGuitar:
-    """Load-time migrations for every neck of a profile or setup (half-stop tokens). The old
+    """Load-time migrations for every neck of a profile or setup (legacy IDs such as `VL` -> `LKV`,
+    then half-stop tokens), so a no-op editor Apply never renames controllers (B1, A2). The old
     per-neck profile link (`Neck.source_profile`) is no longer used and is cleared."""
     for neck in guitar.necks:
+        migrate_legacy_ids(neck)
         migrate_half_stop_tokens(neck)
         neck.source_profile = ""
     return guitar
@@ -64,13 +70,12 @@ def export_neck(neck: Neck, path) -> None:
     local to this machine, so it is left out; Import Copedant and Import Profile read the file."""
     data = neck.to_dict()
     data["source_profile"] = ""
-    with open(path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    atomic_write_json(path, data)
 
 
 def read_necks_file(path) -> List[Neck]:
     """Every neck in a copedant file: a single `Neck` (profile / exported copedant), a full setup
-    (`{"name", "necks": [...]}`) or a PSG Compass copedant. Half-stop tokens are migrated and the
+    (`{"name", "necks": [...]}`) or a PSG Compass copedant. Legacy IDs and half-stop tokens are migrated and the
     necks are not linked to any profile. Raises ValueError if the file holds no copedant."""
     with open(path, "r", encoding="utf-8") as f:
         data = json.load(f)
@@ -88,6 +93,7 @@ def read_necks_file(path) -> List[Neck]:
     if not necks:
         raise ValueError("The file contains no copedant with strings.")
     for n in necks:
+        migrate_legacy_ids(n)
         migrate_half_stop_tokens(n)
         n.source_profile = ""
     return necks
@@ -117,7 +123,8 @@ class ProfileManager:
     @classmethod
     def _profile_path(cls, name: str) -> Path:
         safe_name = cls.sanitize_name(name)
-        if not safe_name or f"{safe_name}.json" == ACTIVE_SETUP_FILENAME:
+        if (not safe_name or f"{safe_name}.json" == ACTIVE_SETUP_FILENAME
+                or safe_name.upper() in WINDOWS_RESERVED_NAMES):
             raise ValueError(f"Invalid profile name: {name!r}")
         return cls.ensure_storage_dir() / f"{safe_name}.json"
 
@@ -157,8 +164,7 @@ class ProfileManager:
         data = SteelGuitar(name=filepath.stem, necks=guitar.necks, profile=filepath.stem).to_dict()
         for neck_data in data["necks"]:
             neck_data["source_profile"] = ""
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        atomic_write_json(filepath, data)  # B8
         return filepath
 
     @classmethod

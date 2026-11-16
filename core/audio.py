@@ -116,11 +116,14 @@ def compute_newman_cents(neck: "Neck", engaged: Iterable[str], strings: Iterable
     return cents
 
 
-BEND_RANGE_SEMITONES = 2.0  # General MIDI default pitch-bend sensitivity
+# Pitch-bend sensitivity. It is set on every channel with RPN 0 at start-up (B4), so glides do not
+# depend on the synth's default (GM says +/-2, many soft synths use +/-12 or +/-48). +/-12 still
+# gives ~0.15 cent per step and lets 3-semitone pulls and bar slides glide instead of re-striking.
+BEND_RANGE_SEMITONES = 12.0
 
 
 def cents_to_bend(cents: float) -> int:
-    """Pitch-bend value for a cents offset, assuming the GM default +/-2 semitone bend range."""
+    """Pitch-bend value for a cents offset in the +/-BEND_RANGE_SEMITONES range set at start-up."""
     return int(max(-8192, min(8191, (cents / (BEND_RANGE_SEMITONES * 100.0)) * 8191)))
 
 
@@ -141,6 +144,12 @@ class _Scheduler(threading.Thread):
     def schedule(self, delay: float, fn: Callable[[], None]) -> None:
         with self._cond:
             heapq.heappush(self._queue, (time.monotonic() + max(0.0, delay), next(self._seq), fn))
+            self._cond.notify()
+
+    def clear(self) -> None:
+        """Drops every queued action (Stop, shutdown), so no queued note sounds afterwards (B2)."""
+        with self._cond:
+            self._queue.clear()
             self._cond.notify()
 
     def stop(self, timeout: float = 1.0) -> None:
@@ -197,6 +206,7 @@ class MidiAudioEngine:
         self._current_bends: Dict[int, int] = {}    # channel -> bend (-8192 to 8191)
         self._glide_gen: Dict[int, int] = {}        # channel -> generation; newer strikes/glides cancel older glides
         self.use_compensated_temperament: bool = False
+        self._channels_ready = False                # set by _init_channels (a Stop may drop the queued init)
 
         if send is not None:
             self._send_fn = send
@@ -228,14 +238,21 @@ class MidiAudioEngine:
             except Exception:
                 log.debug("MIDI send failed", exc_info=True)
 
+    def _set_bend_range(self, ch: int, semitones: int) -> None:
+        """RPN 0 (pitch-bend sensitivity), then RPN null so later CC6 messages change nothing (B4)."""
+        for cc, val in ((101, 0), (100, 0), (6, semitones), (38, 0), (101, 127), (100, 127)):
+            self._send((0xB0 | ch) | (cc << 8) | (val << 16))
+
     def _init_channels(self) -> None:
         for ch in ALL_CHANNELS:
             self._send(0x000019C0 | ch)  # GM Patch 25: Steel String Acoustic Guitar
             self._send(0x007F40B0 | ch)  # CC 64 (Sustain Pedal ON)
+            self._set_bend_range(ch, int(BEND_RANGE_SEMITONES))
             self._bend(ch, 0)
+        self._channels_ready = True
 
     def _bend(self, channel: int, bend_val: int) -> None:
-        """14-bit pitch bend on a channel. bend_val: -8192..8191 (+/-2 semitones). 0 is center."""
+        """14-bit pitch bend on a channel. bend_val: -8192..8191 (+/-BEND_RANGE_SEMITONES). 0 is center."""
         ch = max(0, min(15, channel))
         val_14bit = max(0, min(16383, int(bend_val + 8192)))
         self._send((0xE0 | ch) | ((val_14bit & 0x7F) << 8) | (((val_14bit >> 7) & 0x7F) << 16))
@@ -260,10 +277,14 @@ class MidiAudioEngine:
         return self._opened
 
     def silence_all(self):
+        """Stop: drops every queued note, click and glide step, then silences every channel (B2)."""
         if not self._opened:
             return
+        self._scheduler.clear()
 
         def _do():
+            if not self._channels_ready:
+                self._init_channels()
             for ch in ALL_CHANNELS:
                 self._glide_gen[ch] = self._glide_gen.get(ch, 0) + 1
                 self._send(0x000078B0 | ch)  # All Sound Off
@@ -329,7 +350,7 @@ class MidiAudioEngine:
     ) -> bool:
         """Bends the note sounding on a string to `semitone_delta` (+ cents) above its struck pitch
         without re-striking it: a pedal/lever "swell" (E-11). Returns False if the target is outside
-        the +/-2 semitone bend range (callers should re-strike instead). A newer glide or strike on
+        the +/-BEND_RANGE_SEMITONES bend range (callers should re-strike instead). A newer glide or strike on
         the same string cancels this one."""
         if not self._opened:
             return False
@@ -387,6 +408,7 @@ class MidiAudioEngine:
         self._scheduler.drain(timeout)
 
     def close(self):
+        self._scheduler.clear()  # queued notes must not play during shutdown (B2, A5)
         if self._opened:
             def _sustain_off():
                 for ch in ALL_CHANNELS:

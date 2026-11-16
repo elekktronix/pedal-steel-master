@@ -13,7 +13,7 @@ from unittest import mock
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from core.audio import SEQUENCE_CHANNEL, MidiAudioEngine, channel_for_string  # noqa: E402
+from core.audio import SEQUENCE_CHANNEL, MidiAudioEngine, channel_for_string, cents_to_bend  # noqa: E402
 from core.pearls_engine import PearlsEngine  # noqa: E402
 from core.profile_manager import ProfileManager  # noqa: E402
 from core import presets  # noqa: E402
@@ -70,11 +70,11 @@ class AudioSchedulerTests(unittest.TestCase):  # E-11 / D-35
 
     def test_glide_reaches_target_and_respects_range(self):
         self.engine.play_pocket({5: 59})
-        self.assertTrue(self.engine.glide_string_pitch(5, 2.0, duration_sec=0.02))
-        self.assertFalse(self.engine.glide_string_pitch(5, 3.0))
+        self.assertTrue(self.engine.glide_string_pitch(5, 3.0, duration_sec=0.02))  # B4: +/-12 range
+        self.assertFalse(self.engine.glide_string_pitch(5, 13.0))
         self.engine.wait_idle()
         bends = [v for kind, ch, _, v in _decode(self.msgs) if kind == "bend" and ch == channel_for_string(5)]
-        self.assertEqual(bends[-1], 8191)
+        self.assertEqual(bends[-1], cents_to_bend(300.0))
         self.assertGreater(len(bends), 10)  # it actually glides in steps
 
     def test_new_strike_cancels_running_glide(self):
@@ -389,7 +389,7 @@ class MainWindowFeatureTests(unittest.TestCase):
         w.audio.calls.clear()
         sf.quiz_combo.setCurrentIndex(sf.quiz_combo.findData("ear"))
         target = sf.quiz_target
-        self.assertIn(("note", None, target.midi_note), w.audio.calls)
+        self.assertIn(("note", target.string_number, target.midi_note), w.audio.calls)  # on its string (A10)
         octave = next((n for n in sf._overlay_notes
                        if n.degree_label == target.degree_label and n.midi_note != target.midi_note), None)
         if octave:

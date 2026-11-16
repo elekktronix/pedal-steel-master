@@ -9,6 +9,8 @@ import logging
 from pathlib import Path
 from typing import Any, Dict
 
+from core.storage import atomic_write_json
+
 log = logging.getLogger(__name__)
 
 SESSION_FILE = Path.home() / ".psg_visualizer" / "session.json"
@@ -29,7 +31,6 @@ def load_session() -> Dict[str, Any]:
 def save_session(session: Dict[str, Any]) -> None:
     try:
         SESSION_FILE.parent.mkdir(parents=True, exist_ok=True)
-        with open(SESSION_FILE, "w", encoding="utf-8") as f:
-            json.dump(session, f, indent=2)
+        atomic_write_json(SESSION_FILE, session)  # B8
     except Exception:
         log.exception("Failed to save session to %s", SESSION_FILE)

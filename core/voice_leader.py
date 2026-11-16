@@ -153,17 +153,81 @@ class VoiceLeadingConstraints:
     trajectory: str = "minimal"  # "up", "down", "up_down", "down_up", "minimal", "random"
     start_fret: Optional[int] = None
     target_pocket: Optional[Set[int]] = None
+    include_half_stops: bool = False  # also try <ID>_HALF stances (active rules only, B13)
 
 
 class VoiceLeadingEngine:
+    @classmethod
+    def _candidates_for(
+        cls, neck: Neck, root: str, norm_type: str, constraints: VoiceLeadingConstraints
+    ) -> List[VoicingMatch]:
+        """In-range voicing candidates for one chord, relaxing the filters step by step."""
+        needs_omission = "7" in norm_type or "9" in norm_type or "dim" in norm_type.lower()
+
+        voicings = VoicingSolver.find_all_voicings(
+            neck=neck,
+            root_name=root,
+            chord_type=norm_type,
+            max_fret=min(24, constraints.max_fret),
+            include_half_stops=constraints.include_half_stops,
+            filter_awkward=True,
+            omitted_intervals={"5"} if needs_omission else None,
+        )
+
+        in_range = [
+            v for v in voicings
+            if constraints.min_fret <= v.fret <= constraints.max_fret
+        ]
+
+        if constraints.target_pocket:
+            p_list = sorted(list(constraints.target_pocket))
+            pocket_matched = [v for v in in_range if v.grip_strings == p_list]
+            if pocket_matched:
+                in_range = pocket_matched
+
+        if not in_range:
+            relaxed = VoicingSolver.find_all_voicings(
+                neck=neck,
+                root_name=root,
+                chord_type=norm_type,
+                max_fret=min(24, constraints.max_fret),
+                include_half_stops=constraints.include_half_stops,
+                filter_awkward=False,
+                omitted_intervals={"5"} if needs_omission else None,
+            )
+            in_range = [
+                v for v in relaxed
+                if constraints.min_fret <= v.fret <= constraints.max_fret
+            ]
+
+        if not in_range and needs_omission:
+            # D-47: dropping the 5th can leave nothing (e.g. Gmaj7 on E9); try the full chord.
+            for awkward_ok in (False, True):
+                full = VoicingSolver.find_all_voicings(
+                    neck=neck,
+                    root_name=root,
+                    chord_type=norm_type,
+                    max_fret=min(24, constraints.max_fret),
+                    include_half_stops=constraints.include_half_stops,
+                    filter_awkward=not awkward_ok,
+                )
+                in_range = [v for v in full if constraints.min_fret <= v.fret <= constraints.max_fret]
+                if in_range:
+                    break
+        return in_range
+
     @classmethod
     def solve_progression(
         cls,
         neck: Neck,
         progression: ChordProgression,
         constraints: VoiceLeadingConstraints,
+        rng=None,
     ) -> List[Optional[VoicingMatch]]:
-        """Solves an optimal sequence of voicings strictly honoring boundaries and trajectories."""
+        """Solves an optimal sequence of voicings strictly honoring boundaries and trajectories.
+        `rng` (a `random.Random`) makes the "random" trajectory reproducible (B12)."""
+        if rng is None:
+            import random as rng
         measures_with_chords = [
             (idx, m.primary_chord) for idx, m in enumerate(progression.measures) if m.primary_chord
         ]
@@ -171,62 +235,15 @@ class VoiceLeadingEngine:
         if not measures_with_chords:
             return [None] * len(progression.measures)
 
+        # B5: each distinct chord is searched once, however often it repeats in the progression.
         candidates_per_step: List[List[VoicingMatch]] = []
-
+        cache: Dict[Tuple[str, str], List[VoicingMatch]] = {}
         for _, chord in measures_with_chords:
             root, ctype = chord
-            norm_type = normalize_chord_type(ctype)
-            needs_omission = "7" in norm_type or "9" in norm_type or "dim" in norm_type.lower()
-
-            voicings = VoicingSolver.find_all_voicings(
-                neck=neck,
-                root_name=root,
-                chord_type=norm_type,
-                max_fret=min(24, constraints.max_fret),
-                filter_awkward=True,
-                omitted_intervals={"5"} if needs_omission else None,
-            )
-
-            in_range = [
-                v for v in voicings
-                if constraints.min_fret <= v.fret <= constraints.max_fret
-            ]
-
-            if constraints.target_pocket:
-                p_list = sorted(list(constraints.target_pocket))
-                pocket_matched = [v for v in in_range if v.grip_strings == p_list]
-                if pocket_matched:
-                    in_range = pocket_matched
-
-            if not in_range:
-                relaxed = VoicingSolver.find_all_voicings(
-                    neck=neck,
-                    root_name=root,
-                    chord_type=norm_type,
-                    max_fret=min(24, constraints.max_fret),
-                    filter_awkward=False,
-                    omitted_intervals={"5"} if needs_omission else None,
-                )
-                in_range = [
-                    v for v in relaxed
-                    if constraints.min_fret <= v.fret <= constraints.max_fret
-                ]
-
-            if not in_range and needs_omission:
-                # D-47: dropping the 5th can leave nothing (e.g. Gmaj7 on E9); try the full chord.
-                for awkward_ok in (False, True):
-                    full = VoicingSolver.find_all_voicings(
-                        neck=neck,
-                        root_name=root,
-                        chord_type=norm_type,
-                        max_fret=min(24, constraints.max_fret),
-                        filter_awkward=not awkward_ok,
-                    )
-                    in_range = [v for v in full if constraints.min_fret <= v.fret <= constraints.max_fret]
-                    if in_range:
-                        break
-
-            candidates_per_step.append(in_range)
+            key = (root, normalize_chord_type(ctype))
+            if key not in cache:
+                cache[key] = cls._candidates_for(neck, key[0], key[1], constraints)
+            candidates_per_step.append(cache[key])
 
         # Chords without any candidate stay None in their own measure; the DP runs over the rest
         # so the result always has exactly one entry per measure (D-12).
@@ -292,8 +309,7 @@ class VoiceLeadingEngine:
                     elif constraints.trajectory == "minimal":
                         traj_cost = jump_dist * 12.0
                     elif constraints.trajectory == "random":
-                        import random
-                        traj_cost = random.uniform(0.0, 40.0)
+                        traj_cost = rng.uniform(0.0, 40.0)
 
                     pedal_changes = len(set(prev_v.engaged_levers).symmetric_difference(set(curr_v.engaged_levers)))
                     total_cost = prev_cost + jump_penalty + traj_cost + (pedal_changes * 3.0)

@@ -13,7 +13,7 @@ from core.chord_identifier import ChordIdentifier
 from core.models import Neck
 from core.resolver import FretboardResolver
 from core.stances import detect_roles, grip_matches_chord, is_c6_neck, resolve_stance
-from core.theory import CHORD_FORMULAS, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, respell
+from core.theory import CHORD_FORMULAS, CHORD_SYMBOL_SUFFIX, NOTE_NAMES_SHARP, NOTE_TO_SEMITONE, respell
 
 ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
     "A#": "Bb",
@@ -21,22 +21,50 @@ ENHARMONIC_FLAT_NAMES: Dict[str, str] = {
     "G#": "Ab",
 }
 
-# ChordIdentifier family -> CHORD_FORMULAS key
-_FAMILY_TO_CHORD_TYPE: Dict[str, str] = {"Major 6": "Major 6th", "Minor 6": "Minor 6th"}
+
+
+_DIM_TYPES = {"Diminished": "°", "Diminished 7th": "°7", "Half-Diminished": "ø7"}
+_MINOR_TYPES = {"Minor": "", "Minor 7th": "7", "Minor 6th": "6", "Minor 9th": "9"}
+
+
+def _chord_name(root: str, chord_type: str) -> str:
+    """Display name built from the root and the formula suffix (A1); "E Maj" for a plain triad."""
+    if chord_type == "Major":
+        return f"{root} Maj"
+    return f"{root}{CHORD_SYMBOL_SUFFIX.get(chord_type, ' ' + chord_type)}"
+
+
+def _roman_for(chord_type: str, delta: int, root: str, roman_maj: Dict[int, str],
+               roman_min: Dict[int, str]) -> Tuple[str, str, str]:
+    """(roman numeral, pill label, category) for a same-fret option, decided by the chord type
+    (a CHORD_FORMULAS key), so aug, m6 and m7b5 keep their own forms (A1)."""
+    name = _chord_name(root, chord_type) if chord_type != "Major" else root
+    if chord_type in _DIM_TYPES:
+        roman = f"{roman_min[delta]}{_DIM_TYPES[chord_type]}"
+        return roman, f"{roman} ({name})", "dim"
+    if chord_type in _MINOR_TYPES:
+        roman = f"{roman_min[delta]}{_MINOR_TYPES[chord_type]}"
+        if chord_type == "Minor":
+            cat = "diatonic" if roman in ("ii", "iii", "vi") else "minor"
+        else:
+            cat = "minor" if chord_type == "Minor 7th" else "color"
+        return roman, f"{roman} ({name})", cat
+    if chord_type == "Dominant 7th":
+        roman = f"{roman_maj[delta]}7"
+        return roman, f"{roman} ({name})", "primary" if roman == "V7" else "dominant"
+    if chord_type.startswith("Dominant"):
+        roman = f"{roman_maj[delta]}{CHORD_SYMBOL_SUFFIX.get(chord_type, '7')}"
+        return roman, f"{roman} ({name})", "dominant"
+    if chord_type == "Major":
+        roman = roman_maj[delta]
+        return roman, f"{roman} ({name})", "primary" if roman in ("I", "IV", "V") else "diatonic"
+    special = {"Sus4": "sus", "6/9": " 6/9", "Major 6th": "6", "Major 7th": "maj7", "Augmented": "+"}
+    roman = f"{roman_maj[delta]}{special.get(chord_type, CHORD_SYMBOL_SUFFIX.get(chord_type, ''))}"
+    return roman, f"{roman} ({name})", "color"
 
 
 def format_chord_root(name: str) -> str:
     return respell(name)  # global sharps/flats preference
-
-
-def _safe_extract_root_and_quality(chord_label: str) -> Tuple[str, str]:
-    clean = chord_label.strip()
-    if not clean:
-        return ("", "")
-    for r in sorted(NOTE_TO_SEMITONE.keys(), key=len, reverse=True):
-        if clean.startswith(r):
-            return (r, clean[len(r):].strip())
-    return ("", "")
 
 
 def _default_neck(c6: bool = False) -> Neck:
@@ -203,75 +231,17 @@ class RelativeMovesEngine:
                 pitches = [s.active_midi for s in grip_states]
                 bass_state = max(grip_states, key=lambda s: s.string_number)
 
-                match = ChordIdentifier.identify_voicing(
-                    pitches=pitches,
-                    bass_pitch=bass_state.active_midi,
-                    show_inversion=False,
-                    grip_strings=set(grip),
-                )
+                match = ChordIdentifier.identify_chord(pitches, bass_state.active_midi)
                 if not match:
                     continue
-
-                raw_tag, family = match
-
-                # REJECT incomplete dyads/power chords from pretending to be full major triads
-                if "Dyad" in family or "5th" in family:
-                    continue
-
-                root, quality = _safe_extract_root_and_quality(raw_tag)
-                if not root or root not in NOTE_TO_SEMITONE:
+                root, chord_type = match  # data, never parsed from the display tag (A1)
+                # Reject incomplete dyads/power chords pretending to be full triads.
+                if chord_type not in CHORD_FORMULAS or root not in NOTE_TO_SEMITONE:
                     continue
 
                 clean_root = format_chord_root(root)
-                root_pc = NOTE_TO_SEMITONE[root]
-                delta_semi = (root_pc - tonic_pc) % 12
-                chord_type = _FAMILY_TO_CHORD_TYPE.get(family, family)
-                if chord_type not in CHORD_FORMULAS:
-                    chord_type = ""
-
-                q_clean = quality.strip()
-                q_low = q_clean.lower()
-
-                is_dim = "dim" in q_low or "°" in q_low or "m7b5" in q_low
-                is_minor = ("min" in q_low or "m" in q_low) and "maj" not in q_low and not is_dim
-                is_dom = ("7" in q_clean or "9" in q_clean or "dom" in q_low) and not is_minor and "maj" not in q_low and not is_dim
-                is_sus = "sus" in q_low
-                is_69 = "6/9" in q_clean
-                is_maj6 = "6" in q_clean and not is_69
-                is_maj7 = "maj7" in q_low
-
-                if is_dim:
-                    roman = f"{ROMAN_MIN[delta_semi]}°"
-                    pill_label = f"{roman} ({clean_root}°)"
-                    cat = "dim"
-                elif is_minor:
-                    roman = f"{ROMAN_MIN[delta_semi]}7" if "7" in q_clean else ROMAN_MIN[delta_semi]
-                    pill_label = f"{roman} ({clean_root}m)"
-                    cat = "diatonic" if roman in ("ii", "iii", "vi") else "minor"
-                elif is_dom:
-                    roman = f"{ROMAN_MAJ[delta_semi]}7"
-                    pill_label = f"{roman} ({clean_root}7)"
-                    cat = "primary" if roman == "V7" else "dominant"
-                elif is_sus:
-                    roman = f"{ROMAN_MAJ[delta_semi]}sus"
-                    pill_label = f"{roman} ({clean_root}sus)"
-                    cat = "color"
-                elif is_69:
-                    roman = f"{ROMAN_MAJ[delta_semi]} 6/9"
-                    pill_label = f"{roman} ({clean_root}6/9)"
-                    cat = "color"
-                elif is_maj6:
-                    roman = f"{ROMAN_MAJ[delta_semi]}6"
-                    pill_label = f"{roman} ({clean_root}6)"
-                    cat = "color"
-                elif is_maj7:
-                    roman = f"{ROMAN_MAJ[delta_semi]}maj7"
-                    pill_label = f"{roman} ({clean_root}maj7)"
-                    cat = "color"
-                else:
-                    roman = ROMAN_MAJ[delta_semi]
-                    pill_label = f"{roman} ({clean_root})"
-                    cat = "primary" if roman in ("I", "IV", "V") else "diatonic"
+                delta_semi = (NOTE_TO_SEMITONE[root] - tonic_pc) % 12
+                roman, pill_label, cat = _roman_for(chord_type, delta_semi, clean_root, ROMAN_MAJ, ROMAN_MIN)
 
                 if filter_mode == "i_iv_v":
                     if roman not in ("I", "IV", "V", "V7"):
@@ -303,11 +273,12 @@ class RelativeMovesEngine:
 
                 grip_desc = "-".join(map(str, sorted(grip, reverse=True)))
                 ctrl_desc = " + ".join(sorted(ctrls)) if ctrls else "Open"
-                desc = f"{roman} {clean_root} {quality} ({ctrl_desc} on strings {grip_desc})"
+                chord_name = _chord_name(clean_root, chord_type)
+                desc = f"{roman} {chord_name} ({ctrl_desc} on strings {grip_desc})"
 
                 opt = RelativeMoveOption(
                     label=pill_label,
-                    chord_name=f"{clean_root} {quality}",
+                    chord_name=chord_name,
                     target_fret=current_fret,
                     delta_frets=0,
                     controllers=set(ctrls),

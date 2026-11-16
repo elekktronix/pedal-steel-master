@@ -56,10 +56,11 @@ This is the single source of truth for "what does each string sound like". Every
 |---|---|
 | More than 2 pedals | impossible |
 | 2 pedals not adjacent (by number) | impossible |
-| More than 1 of {LKL, LKR, LKV} | impossible |
-| More than 1 of {RKL, RKR, RKV} | impossible |
-| Contact points (pedal = 1, split pedal = 1.5, each knee = 1) ≤ 1 | NATURAL, penalty 0 |
+| More than 1 of {LKL, LKR, LKV, LKL2, VL} | impossible |
+| More than 1 of {RKL, RKR, RKV, RKR2} | impossible (`RKR2` = BE E9 "RKRHS", the RKR half-travel) |
+| More than 1 of {CKL, CKV, CKR}, or a centre lever while both side knees are engaged | impossible (A2) |
+| Contact points (pedal = 1, split pedal = 1.5, each knee group = 1) ≤ 1 | NATURAL, penalty 0 |
 | ≤ 2.5 | STANDARD, penalty 3.0 for two pedals, else 1.5 |
 | > 2.5 | AWKWARD, penalty 12 |
 
-Callers strip `_HALF` before evaluating. Pedal adjacency uses ID numbers, so it is correct only when IDs are physical positions (rule A-2). `VL`, `RKR2` and `CK*` are not in the knee sets and are never checked for clashes.
+Callers strip `_HALF` before evaluating. Pedal adjacency uses ID numbers, so it is correct only when IDs are physical positions (rule A-2). Every standard knee ID (`STANDARDIZED_KNEE_LEVERS`) plus `RKR2` and legacy `VL` is in a knee group (A2); other unknown IDs are still not checked. `VL` is also renamed to `LKV` on every load path (B1).

@@ -274,6 +274,12 @@ class Neck:
 HALF_SUFFIX = "_HALF"
 
 
+def half_stop_controllers(neck: "Neck") -> Set[str]:
+    """Controller IDs that can be half-engaged: those with at least one active HalfStopRule
+    (Critical Rule 7). A `<ID>_HALF` token for any other controller is stale (B3)."""
+    return {rule.controller_id for rule in neck.half_stops if rule.is_active}
+
+
 # ---------------------------------------------------------------------------
 # Changer configuration
 # ---------------------------------------------------------------------------
@@ -322,6 +328,20 @@ def changer_violations(neck: "Neck") -> List[ChangerViolation]:
         if len(downs) > neck.changer_lowers:
             out.append(ChangerViolation(s_num, "lower", downs, neck.changer_lowers))
     return out
+
+# Standard knee lever IDs in physical order: (ID, description, knee). Moved from the copedant
+# editor so lever ordering and ergonomics need no UI import (B19).
+STANDARDIZED_KNEE_LEVERS: List[Tuple[str, str, str]] = [
+    ("LKL", "Left Knee Left", "Left Knee"),
+    ("LKV", "Left Knee Vertical", "Left Knee"),
+    ("LKR", "Left Knee Right", "Left Knee"),
+    ("LKL2", "Left Knee Left 2", "Left Knee"),
+    ("CKL", "Center Knee Left", "Center Knee"),
+    ("CKV", "Center Knee Vertical", "Center Knee"),
+    ("CKR", "Center Knee Right", "Center Knee"),
+    ("RKL", "Right Knee Left", "Right Knee"),
+    ("RKR", "Right Knee Right", "Right Knee"),
+]
 
 # Knee lever IDs removed by the copedant editor on load (legacy variants).
 RETIRED_KNEE_LEVER_IDS = {"VL2", "LKR2", "RKL2", "VR", "VR2", "RKRHS"}
@@ -456,6 +476,30 @@ def shift_pedal_ids(neck: Neck, offset: int) -> None:
     remap_controller_ids(neck, mapping)
 
 
+def has_franklin_p1(neck: Neck) -> bool:
+    """Franklin detection (Critical Rule 10): P1 exists and its label says Franklin."""
+    return "P1" in neck.pedals and "Franklin" in neck.pedals["P1"].label
+
+
+def set_franklin_p1(neck: Neck, enabled: bool, changes: Optional[Dict[int, int]] = None) -> bool:
+    """Inserts or removes a Franklin pedal at P1 and renumbers the other pedals, remapping every
+    split and half-stop reference (D-09, B6). Rules that used the removed Franklin pedal are dropped.
+    Returns True if the neck changed."""
+    if enabled == has_franklin_p1(neck):
+        return False
+    if enabled:
+        shift_pedal_ids(neck, +1)
+        neck.pedals = {"P1": CopedantChange(id="P1", label="P1 (Franklin)", changes=dict(changes or {})),
+                       **neck.pedals}
+    else:
+        del neck.pedals["P1"]
+        neck.splits = [s for s in neck.splits
+                       if not any(c.replace(HALF_SUFFIX, "") == "P1" for c in s.controllers)]
+        neck.half_stops = [h for h in neck.half_stops if h.controller_id.replace(HALF_SUFFIX, "") != "P1"]
+        shift_pedal_ids(neck, -1)
+    return True
+
+
 def undefined_rule_controllers(neck: Neck) -> Set[str]:
     """Controller IDs referenced by split/half-stop rules that do not exist on the neck."""
     defined = set(neck.pedals) | set(neck.knee_levers)
@@ -550,9 +594,9 @@ class SteelGuitar:
         }
 
     def save_to_file(self, filepath: str) -> None:
-        payload = self.to_dict()
-        with open(filepath, "w", encoding="utf-8") as f:
-            json.dump(payload, f, indent=2)
+        from core.storage import atomic_write_json  # crash-safe write (B8)
+
+        atomic_write_json(filepath, self.to_dict())
 
     @classmethod
     def load_from_file(cls, filepath: str) -> "SteelGuitar":

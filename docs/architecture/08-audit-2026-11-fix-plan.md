@@ -1,6 +1,20 @@
 # 08 — Audit fix plan (external audit, 2026-11-12)
 
-Status: **PLANNED, nothing fixed yet.** Source: an external audit (Argon) of `core/` and `ui/`, then re-checked against the code on 2026-11-12. Every item below was confirmed by reading the current source unless marked otherwise. The audit's line numbers were off, so the locations here are current ones (verify again before editing, they drift).
+Status (2026-11-16): **in progress. P1 items done** (moved to `06-defect-register.md` as D-49–D-52; tests in `tests/test_audit_a.py`). The 2026-11-16 audit fixes (`09`, B-items) also closed parts of A3 and A5. P2, P3 and the docs batch are open.
+
+| Item | Status |
+|---|---|
+| A1 | ✅ Fixed (D-49) |
+| A2 | ✅ Fixed (D-50). Open questions decided: `RKR2` kept and grouped with the right knee; `LKL2` left knee; `CKL/CKV/CKR` a centre group (one at a time, not with both side knees busy). |
+| A3 | ◐ Partly: Auto-Detect Splits no longer duplicates rows (B7). Remove paths, 3-controller rules and Control 1 == Control 2 are open. |
+| A4 | Open |
+| A5 | ◐ Half: `close()` clears the scheduler queue (B2). Newman cents order is open. |
+| A6, A8, A9, A11, A12 | Open |
+| A7 | ✅ Fixed (D-51): no voicing passes the filter → nothing moves, status bar explains |
+| A10 | ✅ Fixed (D-52) |
+| Docs batch | Open (05 now describes the startup settings, not yet in the key list) |
+
+Source: an external audit (Argon) of `core/` and `ui/`, then re-checked against the code on 2026-11-12. Every item below was confirmed by reading the current source unless marked otherwise. The audit's line numbers were off, so the locations here are current ones (verify again before editing, they drift).
 
 Proposed IDs continue the defect register (last used: D-48). Move each item into `06-defect-register.md` when it is fixed, and mark it fixed there instead of deleting it. Per `CLAUDE.md`: minimal diffs, resolve musical changes through `FretboardResolver` in a test, keep `core/` Qt-free.
 
